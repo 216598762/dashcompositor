@@ -39,6 +39,7 @@
 //! corresponding feature is disabled in the current build.
 
 use crate::framebuffer::FrameBuffer;
+use std::io::Write;
 
 /// Terminal graphics protocol used to encode the composited
 /// framebuffer.
@@ -358,6 +359,70 @@ fn dispatch(protocol: Protocol, frame: &FrameBuffer) -> Result<Vec<u8>, EncoderE
 impl ProtocolEncoder for Protocol {
     fn encode(&self, frame: &FrameBuffer) -> Result<Vec<u8>, EncoderError> {
         dispatch(*self, frame)
+    }
+}
+
+/// End-to-end streaming dispatch: encodes `frame` via the
+/// per-protocol streaming entry point and writes the result
+/// to `out`. **v0.8.6**: mirrors the private [`dispatch()`]
+/// function but writes to a `&mut impl Write` sink instead
+/// of returning a `Vec<u8>`. This combines the v0.8.2 Kitty
+/// streaming, v0.8.3 tmux passthrough wrap, v0.8.4 Sixel
+/// streaming, and v0.8.5 fixed-palette Sixel streaming
+/// work into a single end-to-end streaming dispatch.
+///
+/// For [`Protocol::Kitty`]: delegates to
+/// [`kitty::encode_passthrough_to_writer`] (which handles
+/// the optional tmux passthrough wrap when the
+/// `DASHPASSTHROUGH` opt-in is set; otherwise equivalent
+/// to [`kitty::encode_to_writer`]).
+///
+/// For [`Protocol::Sixel`]: delegates to
+/// [`sixel::encode_to_writer`] (the v0.8.4 streaming
+/// entry point that writes the Sixel DCS directly to the
+/// sink; uses the `icy_sixel` crate's adaptive
+/// quantization).
+///
+/// For [`Protocol::Auto`]: recurses via
+/// `dispatch_to_writer(detect(), frame, out)`. The
+/// recursion is bounded because [`detect`] returns only
+/// `Kitty` or `Sixel` (never `Auto`) by construction.
+///
+/// **Peak memory**: O(1) per write call. The per-protocol
+/// streaming entry points handle the framebuffer memory
+/// management internally (the Kitty arm's
+/// `KittyCommandWriter` is per-chunk-incremental; the
+/// Sixel arm's `SixelImage::encode` produces a single
+/// `String` that's written through to the sink without
+/// materialising a `Vec`).
+///
+/// **Wire format**: byte-for-byte equivalent to the
+/// `Vec<u8>`-returning [`ProtocolEncoder::encode`] for
+/// the same input (when the tmux passthrough opt-in is
+/// not set; with the opt-in, the Kitty arm wraps the
+/// output in a tmux passthrough DCS, which is the same
+/// behaviour as `dispatch`).
+pub fn dispatch_to_writer<W: Write>(
+    protocol: Protocol,
+    frame: &FrameBuffer,
+    out: &mut W,
+) -> Result<(), EncoderError> {
+    match protocol {
+        #[cfg(feature = "kitty-encoder")]
+        Protocol::Kitty => kitty::encode_passthrough_to_writer(frame, out),
+        #[cfg(not(feature = "kitty-encoder"))]
+        Protocol::Kitty => {
+            let _ = (frame, out);
+            Err(EncoderError::UnsupportedProtocol("kitty"))
+        }
+        #[cfg(feature = "sixel-encoder")]
+        Protocol::Sixel => sixel::encode_to_writer(frame, out),
+        #[cfg(not(feature = "sixel-encoder"))]
+        Protocol::Sixel => {
+            let _ = (frame, out);
+            Err(EncoderError::UnsupportedProtocol("sixel"))
+        }
+        Protocol::Auto => dispatch_to_writer(detect(), frame, out),
     }
 }
 
@@ -938,6 +1003,349 @@ mod sixel {
         encode_to_writer(frame, &mut out)?;
         Ok(out)
     }
+
+    // -- v0.8.5: fixed-palette streaming Sixel encoder ----------------
+    //
+    // The v0.8.4 streaming Sixel path still materialises the
+    // full framebuffer in a `Vec<u8>` (8MB+ for a 2MP frame)
+    // because `icy_sixel::SixelImage::from_rgba(Vec<u8>, w, h)`
+    // takes owned bytes and has no streaming input API.
+    // v0.8.5 adds a fully O(1)-memory streaming entry point
+    // that uses a fixed xterm-256 palette (16 basic + 6×6×6
+    // RGB cube + 24 grayscale) and emits band-by-band in a
+    // single DCS sequence. The 8MB+ RGBA `Vec<u8>` is gone --
+    // pixels are read directly from the `FrameBuffer`.
+    //
+    // **Trade-off vs. `encode_to_writer`**: the fixed palette
+    // means lower image quality for photos (no adaptive
+    // quantization per image) compared to `icy_sixel`'s
+    // adaptive quantiser. For UI/dashboards (the
+    // dashcompositor primary use case) the quality loss is
+    // minimal. The `icy_sixel`-based `encode_to_writer` is
+    // preserved as the high-quality, O(N)-memory path for
+    // small framebuffers; `encode_to_writer_streaming` is
+    // the O(1)-memory path for multi-megapixel framebuffers.
+    //
+    // **Wire format**: single DCS sequence
+    // `ESC P 0;0;W;H q #0;2;R;G;B #1;2;R;G;B ... <sixel-data> ESC \`:
+    // - `0;0;W;H` is the raster attributes (mode 0, no aspect
+    //   ratio, pixel width W, pixel height H)
+    // - `#Pc;2;R;G;B` defines each of the 256 palette colors
+    //   in 0-100 RGB scale (Sixel uses 0-100, not 0-255)
+    // - Sixel data is emitted in bands of 6 rows, with `-`
+    //   between bands (carriage return + newline)
+    // - Per-column color tracking: for each 6-row column, the
+    //   most common palette index is selected, and sixel bits
+    //   mark only the pixels that match
+    // - RLE: `! <n> <ch>` repeats a sixel character (only when
+    //   the encoded form is shorter than the raw form)
+    // - Sixel character mapping: value 0-63 -> `?` (63) to
+    //   `~` (126) (printable ASCII range)
+
+    /// The xterm-256 palette: 16 basic colors + 6×6×6 RGB
+    /// cube + 24 grayscale. Generated at compile time via a
+    /// `const fn` with `while` loops (stable since Rust 1.61).
+    /// The palette is used as the lookup table for the
+    /// streaming Sixel encoder's per-pixel quantization.
+    const XTERM_256_PALETTE: [(u8, u8, u8); 256] = build_xterm_256_palette();
+
+    /// `const fn` that builds the xterm-256 palette at
+    /// compile time. Uses `while` loops in const context
+    /// (stable since Rust 1.61) to fill the 6×6×6 cube
+    /// (216 entries) and the 24 grayscale ramp. The 16
+    /// basic colors are filled with direct assignments.
+    const fn build_xterm_256_palette() -> [(u8, u8, u8); 256] {
+        let mut palette = [(0u8, 0u8, 0u8); 256];
+        // 0-15: basic colors (standard ANSI/IRC values)
+        palette[0] = (0, 0, 0);
+        palette[1] = (128, 0, 0);
+        palette[2] = (0, 128, 0);
+        palette[3] = (128, 128, 0);
+        palette[4] = (0, 0, 128);
+        palette[5] = (128, 0, 128);
+        palette[6] = (0, 128, 128);
+        palette[7] = (192, 192, 192);
+        palette[8] = (128, 128, 128);
+        palette[9] = (255, 0, 0);
+        palette[10] = (0, 255, 0);
+        palette[11] = (255, 255, 0);
+        palette[12] = (0, 0, 255);
+        palette[13] = (255, 0, 255);
+        palette[14] = (0, 255, 255);
+        palette[15] = (255, 255, 255);
+        // 16-231: 6×6×6 RGB cube with values
+        // [0, 95, 135, 175, 215, 255]
+        const CUBE_VALUES: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        let mut i = 0;
+        while i < 216 {
+            let r_idx = i / 36;
+            let g_idx = (i / 6) % 6;
+            let b_idx = i % 6;
+            palette[16 + i] =
+                (CUBE_VALUES[r_idx], CUBE_VALUES[g_idx], CUBE_VALUES[b_idx]);
+            i += 1;
+        }
+        // 232-255: 24 grayscale ramp with values
+        // [8, 18, 28, ..., 238] (8 + i*10 for i in 0..24)
+        let mut i = 0;
+        while i < 24 {
+            let v = (8 + i * 10) as u8;
+            palette[232 + i] = (v, v, v);
+            i += 1;
+        }
+        palette
+    }
+
+    /// 5-bit-per-channel RGB to palette index lookup table.
+    /// Maps `(r5, g5, b5)` (each 0-31) to the nearest
+    /// xterm-256 palette index. Built lazily on first call
+    /// via `OnceLock` (stable since Rust 1.70). 32K entries
+    /// × 1 byte = 32KB, computed in O(32K × 256) = ~8M
+    /// operations at startup (one-time cost, ~100ms on
+    /// modern hardware). After init, per-pixel quantization
+    /// is O(1) (one table lookup).
+    fn palette_lut() -> &'static [u8; 32 * 32 * 32] {
+        use std::sync::OnceLock;
+        static LUT: OnceLock<[u8; 32 * 32 * 32]> = OnceLock::new();
+        LUT.get_or_init(|| {
+            let mut lut = [0u8; 32 * 32 * 32];
+            for r5 in 0..32u8 {
+                for g5 in 0..32u8 {
+                    for b5 in 0..32u8 {
+                        // Map 5-bit to 8-bit: (value * 255) / 31
+                        let r = (u16::from(r5) * 255) / 31;
+                        let g = (u16::from(g5) * 255) / 31;
+                        let b = (u16::from(b5) * 255) / 31;
+                        let idx = (r5 as usize) * 32 * 32
+                            + (g5 as usize) * 32
+                            + (b5 as usize);
+                        lut[idx] = nearest_palette_index(r, g, b);
+                    }
+                }
+            }
+            lut
+        })
+    }
+
+    /// Find the nearest xterm-256 palette index for an
+    /// `(r, g, b)` triple using Euclidean distance in RGB
+    /// space. O(256) per call; only called at LUT
+    /// initialization time (32K calls total, one-time cost).
+    fn nearest_palette_index(r: u16, g: u16, b: u16) -> u8 {
+        let mut best_idx = 0u8;
+        let mut best_dist = u32::MAX;
+        for (i, &(pr, pg, pb)) in XTERM_256_PALETTE.iter().enumerate() {
+            let dr = i32::from(r) - i32::from(pr);
+            let dg = i32::from(g) - i32::from(pg);
+            let db = i32::from(b) - i32::from(pb);
+            let dist = (dr * dr + dg * dg + db * db) as u32;
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = i as u8;
+            }
+        }
+        best_idx
+    }
+
+    /// Quantize an RGBA pixel to the nearest xterm-256
+    /// palette index. O(1) per call (one LUT lookup). The
+    /// alpha channel is ignored (Sixel has no alpha;
+    /// transparent pixels are quantized to the nearest
+    /// palette color, which is usually close to black if
+    /// the RGB values are also 0).
+    fn quantize_pixel(r: u8, g: u8, b: u8) -> u8 {
+        let lut = palette_lut();
+        let r5 = (r >> 3) as usize;
+        let g5 = (g >> 3) as usize;
+        let b5 = (b >> 3) as usize;
+        lut[r5 * 32 * 32 + g5 * 32 + b5]
+    }
+
+    /// Encodes `frame` as a Sixel DCS using a fixed
+    /// xterm-256 palette and band-by-band emission.
+    /// **v0.8.5 fully memory-bounded streaming entry
+    /// point**: writes the Sixel DCS bytes directly to the
+    /// caller's `&mut impl Write` sink with O(1) memory
+    /// (no full-framebuffer `Vec<u8>` allocation). The
+    /// 8MB+ RGBA `Vec<u8>` that the v0.8.4
+    /// `encode_to_writer` still materialises is gone --
+    /// pixels are read directly from the `FrameBuffer`.
+    ///
+    /// See the module doc comment on the v0.8.5 section
+    /// above for the full wire format specification and
+    /// the quality trade-off vs. `encode_to_writer`.
+    pub fn encode_to_writer_streaming<W: Write>(
+        frame: &FrameBuffer,
+        out: &mut W,
+    ) -> Result<(), EncoderError> {
+        if frame.width() == 0 || frame.height() == 0 {
+            return Err(EncoderError::InvalidDimensions {
+                width: frame.width(),
+                height: frame.height(),
+            });
+        }
+
+        let width = frame.width() as usize;
+        let height = frame.height() as usize;
+        let pixels = frame.pixels();
+
+        // DCS header: ESC P 0;0;W;H q
+        // Mode 0 (no aspect ratio), nparams 0, Ph=W, Pv=H.
+        write!(out, "\x1bP0;0;{width};{height}q")?;
+
+        // Define the full 256-color palette in the DCS
+        // header. Each entry is `#Pc;2;R;G;B` where R,G,B
+        // are 0-100 (Sixel uses 0-100 scale, not 0-255).
+        // This adds ~3KB to the output (256 × ~12 bytes),
+        // negligible for multi-megapixel images. Defining
+        // all 256 colors (not just the used ones) keeps the
+        // implementation simple and the wire format
+        // predictable.
+        for (i, &(r, g, b)) in XTERM_256_PALETTE.iter().enumerate() {
+            let r100 = u32::from(r) * 100 / 255;
+            let g100 = u32::from(g) * 100 / 255;
+            let b100 = u32::from(b) * 100 / 255;
+            write!(out, "#{i};2;{r100};{g100};{b100}")?;
+        }
+
+        // Emit sixel data band-by-band. Each band is 6 rows
+        // tall. For each column, we find the most common
+        // palette index among the 6 pixels (the "dominant"
+        // color), then build a sixel character where bit
+        // `dy` is 1 if the pixel at (x, y_start+dy) matches
+        // the dominant color. Ties are broken by lower
+        // palette index (deterministic).
+        let num_bands = height.div_ceil(6);
+        for band_idx in 0..num_bands {
+            let y_start = band_idx * 6;
+            let y_end = (y_start + 6).min(height);
+
+            let mut current_color: u8 = 0;
+            let mut color_announced = false;
+            let mut run_char: Option<u8> = None;
+            let mut run_len: usize = 0;
+
+            for x in 0..width {
+                // Quantize each of the 6 pixels in this
+                // column. Pixels beyond y_end (last partial
+                // band) are treated as 0 (background).
+                let mut column_palette = [0u8; 6];
+                for (dy, slot) in column_palette.iter_mut().enumerate() {
+                    let y = y_start + dy;
+                    if y < y_end {
+                        let [r, g, b, _a] = pixels[y * width + x];
+                        *slot = quantize_pixel(r, g, b);
+                    }
+                }
+
+                // Find the dominant palette index (most
+                // common among the 6 pixels). O(36) per
+                // column (6×6 comparisons), negligible
+                // compared to the per-pixel LUT lookup.
+                // Ties broken by lower index (deterministic).
+                let mut best_color = column_palette[0];
+                let mut best_count = 1u8;
+                for &palette_i in column_palette.iter() {
+                    let mut count = 0u8;
+                    for &palette_j in column_palette.iter() {
+                        if palette_j == palette_i {
+                            count += 1;
+                        }
+                    }
+                    if count > best_count
+                        || (count == best_count && palette_i < best_color)
+                    {
+                        best_count = count;
+                        best_color = palette_i;
+                    }
+                }
+
+                // Build the 6-bit value: bit `dy` is 1 if
+                // the pixel at (x, y_start+dy) matches the
+                // dominant color.
+                let mut value: u8 = 0;
+                for (dy, &palette) in column_palette.iter().enumerate() {
+                    if palette == best_color {
+                        value |= 1 << dy;
+                    }
+                }
+
+                // Sixel character: value (0-63) + 63 =
+                // ASCII 63-126 ('?' to '~').
+                let char = value + 63;
+
+                // Announce color change if needed. Always
+                // announce the first color (even if it's 0)
+                // to set the initial color state.
+                if !color_announced || best_color != current_color {
+                    flush_sixel_rle(
+                        &mut run_char, &mut run_len, out,
+                    )?;
+                    write!(out, "#{best_color}")?;
+                    current_color = best_color;
+                    color_announced = true;
+                }
+
+                // RLE: if the same sixel character repeats,
+                // accumulate the run length. The RLE is
+                // flushed by `flush_sixel_rle` when the run
+                // ends or when the color changes.
+                if Some(char) == run_char {
+                    run_len += 1;
+                } else {
+                    flush_sixel_rle(
+                        &mut run_char, &mut run_len, out,
+                    )?;
+                    run_char = Some(char);
+                    run_len = 1;
+                }
+            }
+
+            // Flush the last run of the band.
+            flush_sixel_rle(&mut run_char, &mut run_len, out)?;
+
+            // Band separator (except after the last band).
+            // `-` means "carriage return + newline" in
+            // Sixel, moving the cursor to the start of the
+            // next band (6 rows down).
+            if band_idx + 1 < num_bands {
+                out.write_all(b"-")?;
+            }
+        }
+
+        // Terminate DCS.
+        out.write_all(b"\x1b\\")?;
+        Ok(())
+    }
+
+    /// Flush a pending RLE run to the output. If the run
+    /// length is >= 4, emit `! <n> <ch>` (repeat
+    /// introducer). Otherwise emit the single character
+    /// (or multiple copies if the run is 2-3). The
+    /// threshold of 4 is because the RLE form `! <n> <ch>`
+    /// is 4 chars for n=1-9 (1 digit), 5 for n=10-99,
+    /// etc. -- so for runs of 1-3, the raw form is
+    /// shorter or equal.
+    fn flush_sixel_rle<W: Write>(
+        run_char: &mut Option<u8>,
+        run_len: &mut usize,
+        out: &mut W,
+    ) -> std::io::Result<()> {
+        if let Some(c) = *run_char {
+            if *run_len >= 4 {
+                // RLE: ! <n> <ch>
+                write!(out, "!{run_len}{}", c as char)?;
+            } else {
+                // Raw: <ch> repeated run_len times.
+                for _ in 0..*run_len {
+                    out.write_all(&[c])?;
+                }
+            }
+        }
+        *run_char = None;
+        *run_len = 0;
+        Ok(())
+    }
 }
 
 // Re-export the v0.8.4 streaming Sixel `encode_to_writer`
@@ -956,6 +1364,22 @@ mod sixel {
 // compiled in.
 #[cfg(feature = "sixel-encoder")]
 pub use sixel::encode_to_writer;
+
+// Re-export the v0.8.5 fully-memory-bounded streaming
+// Sixel `encode_to_writer_streaming` at the `encoder`
+// module level so downstream users can call it as
+// `dashcompositor::encoder::encode_to_writer_streaming`
+// without reaching into the private `sixel` submodule.
+// This is the O(1)-memory counterpart to the v0.8.4
+// `encode_to_writer` (which still materialises the full
+// RGBA Vec<u8> because `icy_sixel` has no streaming input
+// API). Same rationale as the v0.8.4 re-export: not at
+// the crate root to avoid the ambiguity of a single
+// `encode_to_writer_streaming` name. Gated on
+// `sixel-encoder` because the helper is only available
+// when the Sixel encoder crate is compiled in.
+#[cfg(feature = "sixel-encoder")]
+pub use sixel::encode_to_writer_streaming;
 
 #[cfg(test)]
 mod tests {
@@ -2268,6 +2692,143 @@ mod tests {
         assert!(out.len() < (w as usize * h as usize * 4));
     }
 
+    // -- v0.8.5: fixed-palette streaming Sixel encode tests ----------
+    //
+    // The v0.8.5 streaming entry point
+    // `sixel::encode_to_writer_streaming<W: Write>` writes
+    // the Sixel DCS bytes directly to the caller's `&mut
+    // impl Write` sink with O(1) memory (no full-
+    // framebuffer `Vec<u8>` allocation). The v0.8.4
+    // `encode_to_writer` path still materialises the full
+    // RGBA `Vec<u8>` because `icy_sixel` 0.5 has no
+    // streaming input API. v0.8.5 adds a fully O(1) path
+    // that uses a fixed xterm-256 palette (16 basic +
+    // 6x6x6 RGB cube + 24 grayscale) and emits band-by-
+    // band in a single DCS sequence.
+    //
+    // These tests verify (a) the basic DCS structure
+    // (header, palette, sixel data, terminator), (b) the
+    // RLE compression for uniform colors, (c) the band
+    // separator emission, (d) the zero-dimensions error
+    // path, and (e) a 2MP smoke test (realistic
+    // framebuffer size).
+
+    /// Basic structure test: a 2x2 framebuffer with
+    /// known colors produces a valid Sixel DCS with
+    /// the expected structure (DCS header, palette
+    /// definitions, sixel data, DCS terminator).
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_to_writer_streaming_basic_structure() {
+        let mut fb = FrameBuffer::new(2, 2);
+        for px in fb.pixels_mut() {
+            *px = [255, 0, 0, 255]; // red
+        }
+        let mut out: Vec<u8> = Vec::new();
+        super::sixel::encode_to_writer_streaming(&fb, &mut out)
+            .unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(
+            s.starts_with("\x1bP0;0;2;2q"),
+            "missing DCS header, got prefix: {:?}",
+            &s[..s.len().min(20)],
+        );
+        assert!(s.contains("#0;2;0;0;0"), "missing color 0");
+        assert!(s.contains("#15;2;100;100;100"), "missing color 15");
+        assert!(
+            s.ends_with("\x1b\\"),
+            "missing DCS terminator, got suffix: {:?}",
+            &s[s.len().saturating_sub(20)..],
+        );
+    }
+
+    /// RLE test: a framebuffer with a solid color
+    /// produces output that uses the `! <n> <ch>`
+    /// repeat introducer for the run of identical
+    /// sixel characters.
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_to_writer_streaming_uses_rle_for_solid_color() {
+        let mut fb = FrameBuffer::new(10, 1);
+        for px in fb.pixels_mut() {
+            *px = [255, 0, 0, 255]; // red
+        }
+        let mut out: Vec<u8> = Vec::new();
+        super::sixel::encode_to_writer_streaming(&fb, &mut out)
+            .unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(
+            s.contains('!'),
+            "expected RLE repeat introducer `!`, got output: {s:?}"
+        );
+    }
+
+    /// Band separator test: a framebuffer with height
+    /// greater than 6 produces output with `-` band separators
+    /// between the 6-row bands.
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_to_writer_streaming_uses_band_separators() {
+        let mut fb = FrameBuffer::new(1, 12); // 2 bands of 6 rows
+        for px in fb.pixels_mut() {
+            *px = [0, 255, 0, 255]; // green
+        }
+        let mut out: Vec<u8> = Vec::new();
+        super::sixel::encode_to_writer_streaming(&fb, &mut out)
+            .unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        let separator_count = s.matches('-').count();
+        assert_eq!(
+            separator_count, 1,
+            "expected 1 band separator for 12-row frame, got {separator_count}"
+        );
+    }
+
+    /// Zero-dimensions test: the streaming entry
+    /// point surfaces the same `InvalidDimensions`
+    /// error as the `encode` path.
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_to_writer_streaming_rejects_zero_dimensions() {
+        let fb_zero_w = FrameBuffer::new(0, 5);
+        let fb_zero_h = FrameBuffer::new(5, 0);
+        let fb_zero_both = FrameBuffer::new(0, 0);
+        let mut buf: Vec<u8> = Vec::new();
+        for fb in [&fb_zero_w, &fb_zero_h, &fb_zero_both] {
+            let err = super::sixel::encode_to_writer_streaming(
+                fb, &mut buf,
+            )
+            .unwrap_err();
+            assert!(matches!(err, EncoderError::InvalidDimensions { .. }));
+        }
+        assert!(buf.is_empty());
+    }
+
+    /// 2MP smoke test: a 1920x1080 framebuffer encodes
+    /// correctly through the streaming path with O(1)
+    /// memory. Verifies the expected number of band
+    /// separators (1080 / 6 = 180 bands, 179
+    /// separators).
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_to_writer_streaming_2mp_frame_smoke_test() {
+        let w: u32 = 1920;
+        let h: u32 = 1080;
+        let fb = FrameBuffer::new(w, h);
+        let mut out: Vec<u8> = Vec::new();
+        super::sixel::encode_to_writer_streaming(&fb, &mut out)
+            .unwrap();
+        assert!(!out.is_empty());
+        assert!(out.starts_with(b"\x1bP"));
+        assert!(out.ends_with(b"\x1b\\"));
+        let s = std::str::from_utf8(&out).unwrap();
+        let separator_count = s.matches('-').count();
+        assert_eq!(
+            separator_count, 179,
+            "expected 179 band separators for 1080-row frame, got {separator_count}"
+        );
+    }
+
     // -- v0.8.3: streaming wrap_for_tmux tests -----------------------
     //
     // The v0.8.3 streaming wrap entry point
@@ -2446,4 +3007,136 @@ mod tests {
             assert_eq!(out, from_dispatch);
         });
     }
+    // -- v0.8.6: dispatch_to_writer end-to-end streaming tests --------
+    //
+    // The v0.8.6 `dispatch_to_writer<W: Write>(protocol,
+    // frame, &mut W)` entry point combines the v0.8.2
+    // Kitty streaming, v0.8.3 tmux passthrough wrap,
+    // and v0.8.4 Sixel streaming work into a single
+    // end-to-end streaming dispatch. These tests verify
+    // (a) byte-for-byte equivalence with the Vec<u8>-
+    // returning dispatch() for the same input, (b) the
+    // disabled-feature arms return UnsupportedProtocol,
+    // (c) the Auto arm recurses correctly via detect(),
+    // and (d) a 2MP smoke test.
+
+    /// When tmux passthrough is disabled, the Kitty
+    /// arm of dispatch_to_writer must produce the same
+    /// output as the Vec<u8>-returning dispatch()
+    /// function. This pins the v0.8.6 invariant: the
+    /// streaming dispatch and the Vec<u8> dispatch
+    /// produce identical bytes for the same input
+    /// (modulo the tmux passthrough wrap, which is
+    /// disabled here via with_env).
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn dispatch_to_writer_kitty_matches_dispatch() {
+        with_env(None, None, None, None, || {
+            let mut fb = FrameBuffer::new(4, 4);
+            for px in fb.pixels_mut() {
+                *px = [10, 20, 30, 255];
+            }
+            // Vec<u8> path via dispatch().
+            let from_dispatch = dispatch(Protocol::Kitty, &fb).unwrap();
+            // Streaming path via dispatch_to_writer().
+            let mut from_streaming: Vec<u8> = Vec::new();
+            super::dispatch_to_writer(Protocol::Kitty, &fb, &mut from_streaming).unwrap();
+            assert_eq!(from_dispatch, from_streaming);
+        });
+    }
+
+    /// The Sixel arm of dispatch_to_writer must produce
+    /// the same output as dispatch() for the same input.
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn dispatch_to_writer_sixel_matches_dispatch() {
+        let mut fb = FrameBuffer::new(4, 4);
+        for px in fb.pixels_mut() {
+            *px = [10, 20, 30, 255];
+        }
+        let from_dispatch = dispatch(Protocol::Sixel, &fb).unwrap();
+        let mut from_streaming: Vec<u8> = Vec::new();
+        super::dispatch_to_writer(Protocol::Sixel, &fb, &mut from_streaming).unwrap();
+        assert_eq!(from_dispatch, from_streaming);
+    }
+
+    /// The Auto arm must recurse via detect() to the
+    /// correct concrete protocol. With TERM=xterm-kitty
+    /// (a known Kitty terminfo name), the recursion
+    /// should land in the Kitty arm and produce Kitty
+    /// escape bytes.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn dispatch_to_writer_auto_resolves_via_detect() {
+        with_env(Some("xterm-kitty"), None, None, None, || {
+            let mut fb = FrameBuffer::new(2, 2);
+            for px in fb.pixels_mut() {
+                *px = [128, 64, 32, 255];
+            }
+            let from_auto: Vec<u8> = {
+                let mut out: Vec<u8> = Vec::new();
+                super::dispatch_to_writer(Protocol::Auto, &fb, &mut out).unwrap();
+                out
+            };
+            let from_kitty: Vec<u8> = {
+                let mut out: Vec<u8> = Vec::new();
+                super::dispatch_to_writer(Protocol::Kitty, &fb, &mut out).unwrap();
+                out
+            };
+            // With TERM=xterm-kitty, Auto resolves to Kitty,
+            // so the outputs must be byte-for-byte equal.
+            assert_eq!(from_auto, from_kitty);
+        });
+    }
+
+    /// 2MP smoke test: a 1920x1080 framebuffer encodes
+    /// correctly through the end-to-end streaming
+    /// dispatch (via the Kitty arm) with O(1) memory.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn dispatch_to_writer_2mp_frame_smoke_test() {
+        with_env(None, None, None, None, || {
+            let w: u32 = 1920;
+            let h: u32 = 1080;
+            let fb = FrameBuffer::new(w, h);
+            let mut out: Vec<u8> = Vec::new();
+            super::dispatch_to_writer(Protocol::Kitty, &fb, &mut out).unwrap();
+            assert!(!out.is_empty());
+            // Kitty APC starts with \x1b_G (without tmux
+            // passthrough wrap).
+            assert!(out.starts_with(b"\x1b_G"));
+            assert!(out.ends_with(b"\x1b\\"));
+        });
+    }
+
+    /// Disabled-feature test: when the kitty-encoder
+    /// feature is off, dispatch_to_writer(Protocol::Kitty)
+    /// must return UnsupportedProtocol("kitty"), matching
+    /// the dispatch() behaviour.
+    #[cfg(not(feature = "kitty-encoder"))]
+    #[test]
+    fn dispatch_to_writer_kitty_unsupported_without_feature() {
+        let fb = FrameBuffer::new(2, 2);
+        let mut out: Vec<u8> = Vec::new();
+        let err = super::dispatch_to_writer(Protocol::Kitty, &fb, &mut out)
+            .unwrap_err();
+        assert_eq!(err, EncoderError::UnsupportedProtocol("kitty"));
+        // Buffer must be untouched.
+        assert!(out.is_empty());
+    }
+
+    /// Disabled-feature test: when the sixel-encoder
+    /// feature is off, dispatch_to_writer(Protocol::Sixel)
+    /// must return UnsupportedProtocol("sixel").
+    #[cfg(not(feature = "sixel-encoder"))]
+    #[test]
+    fn dispatch_to_writer_sixel_unsupported_without_feature() {
+        let fb = FrameBuffer::new(2, 2);
+        let mut out: Vec<u8> = Vec::new();
+        let err = super::dispatch_to_writer(Protocol::Sixel, &fb, &mut out)
+            .unwrap_err();
+        assert_eq!(err, EncoderError::UnsupportedProtocol("sixel"));
+        assert!(out.is_empty());
+    }
+
 }

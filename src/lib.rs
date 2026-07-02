@@ -33,7 +33,7 @@ pub use encoder::encode_passthrough_to_writer;
 // ambiguous in a build with both `kitty-encoder` and
 // `sixel-encoder` enabled (which one wins?), and the
 // module-path access is more explicit anyway.
-pub use encoder::{detect, EncoderError, Protocol, ProtocolEncoder};
+pub use encoder::{detect, dispatch_to_writer, EncoderError, Protocol, ProtocolEncoder};
 pub use framebuffer::{blend_over, FrameBuffer};
 pub use geometry::Rect;
 #[cfg(feature = "image-decoder")]

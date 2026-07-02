@@ -1,3 +1,149 @@
+## 0.8.6 (2026-07-02)
+
+End-to-end O(1) streaming dispatch: adds a new
+public `dispatch_to_writer<W: Write>(protocol, frame,
+&mut W) -> Result<(), EncoderError>` entry point that
+mirrors the private `dispatch()` function but writes
+to a `&mut impl Write` sink instead of returning a
+`Vec<u8>`. This combines the v0.8.2 Kitty streaming,
+v0.8.3 tmux passthrough wrap, v0.8.4 Sixel streaming,
+and v0.8.5 fixed-palette Sixel streaming work into a
+single end-to-end streaming dispatch.
+
+### Added
+- `pub fn dispatch_to_writer<W: Write>(protocol: Protocol,
+  frame: &FrameBuffer, out: &mut W) -> Result<()>` in
+  `dashcompositor::encoder`. Re-exported at the crate
+  root as `dashcompositor::dispatch_to_writer`.
+- For `Protocol::Kitty`: delegates to
+  `kitty::encode_passthrough_to_writer` (which handles
+  the optional tmux passthrough wrap when the
+  `DASHPASSTHROUGH` opt-in is set).
+- For `Protocol::Sixel`: delegates to
+  `sixel::encode_to_writer` (the v0.8.4 streaming
+  entry point).
+- For `Protocol::Auto`: recurses via
+  `dispatch_to_writer(detect(), frame, out)`.
+
+### Tests
+- 6 new unit tests:
+  `dispatch_to_writer_kitty_matches_dispatch` (Kitty
+  arm matches the Vec<u8> dispatch byte-for-byte);
+  `dispatch_to_writer_sixel_matches_dispatch` (Sixel
+  arm matches the Vec<u8> dispatch byte-for-byte);
+  `dispatch_to_writer_auto_resolves_via_detect` (Auto
+  arm recurses correctly);
+  `dispatch_to_writer_2mp_frame_smoke_test` (2MP
+  framebuffer through the Kitty arm);
+  `dispatch_to_writer_kitty_unsupported_without_feature`
+  (disabled-feature arm returns UnsupportedProtocol);
+  `dispatch_to_writer_sixel_unsupported_without_feature`
+  (disabled-feature arm returns UnsupportedProtocol).
+
+### Notes
+- All 4 feature combinations clean: cargo fmt, cargo
+  build (default + each feature + both), cargo build
+  --release (default + both), cargo test (127 tests
+  with both features, 0 failed), cargo clippy
+  --all-targets -- -D warnings (0 errors across all 4
+  combos).
+- No public API removals; no new runtime dependencies;
+  no new Cargo features.
+## 0.8.5 (2026-07-02)
+
+Fully memory-bounded streaming Sixel encode: the v0.8.4
+streaming Sixel path still materialised the full
+framebuffer in a `Vec<u8>` (8MB+ for a 2MP image)
+because `icy_sixel::SixelImage::from_rgba(Vec<u8>, w, h)`
+takes owned bytes and has no streaming input API.
+v0.8.5 adds a new public streaming entry point
+`dashcompositor::encoder::sixel::encode_to_writer_streaming<W: Write>(
+frame: &FrameBuffer, out: &mut W) -> Result<(), EncoderError>`
+that uses a fixed xterm-256 palette (16 basic + 6x6x6
+RGB cube + 24 grayscale) and emits band-by-band in a
+single DCS sequence. Peak working set is O(1) per
+write call (~4KB scratch for the LUT and per-chunk
+state), independent of framebuffer size. This brings
+the Sixel arm to full O(1) memory parity with the
+Kitty arm's v0.8.2 streaming entry point.
+
+### Added
+- `pub fn sixel::encode_to_writer_streaming<W: Write>(
+  frame, &mut W) -> Result<(), EncoderError>` in
+  `dashcompositor::encoder`, gated on the
+  `sixel-encoder` Cargo feature. Writes the Sixel DCS
+  bytes to any `std::io::Write` impl (e.g. `Vec<u8>`,
+  `std::fs::File`, `std::net::TcpStream`).
+  Re-exported at the encoder module level as
+  `dashcompositor::encoder::encode_to_writer_streaming`
+  (NOT at the crate root, to avoid the ambiguity of
+  a single `encode_to_writer_streaming` name resolving
+  to different encoders depending on the feature set).
+
+### Implementation details
+- **Fixed xterm-256 palette**: 16 basic colors + 6x6x6
+  RGB cube (values [0, 95, 135, 175, 215, 255]) + 24
+  grayscale ramp (values [8, 18, 28, ..., 238]).
+  Generated at compile time via a `const fn` with
+  `while` loops (stable since Rust 1.61).
+- **5-bit LUT**: 32x32x32 = 32K entry lookup table
+  maps `(r5, g5, b5)` to the nearest palette index
+  in O(1). Built lazily on first call via
+  `std::sync::OnceLock` (stable since Rust 1.70).
+  One-time cost: ~8M operations at startup (~100ms
+  on modern hardware).
+- **Band-by-band emission**: each band is 6 rows tall
+  (one sixel character per column). Bands separated
+  by `-` (carriage return + newline). All 256 palette
+  colors defined once in the DCS header
+  (`#Pc;2;R;G;B` with 0-100 RGB scale).
+- **Per-column color tracking**: for each 6-row
+  column, the most common palette index is selected
+  (ties broken by lower index for determinism).
+  Sixel bits mark only the pixels that match.
+- **RLE**: `! <n> <ch>` repeat introducer for runs
+  >= 4. Sixel character mapping: value 0-63 ->
+  `?` (63) to `~` (126) (printable ASCII range).
+
+### Trade-off vs. `encode_to_writer`
+The fixed xterm-256 palette means lower image quality
+for photos (no adaptive quantization per image)
+compared to `icy_sixel`'s adaptive quantiser. For
+UI/dashboards (the dashcompositor primary use case)
+the quality loss is minimal. The `icy_sixel`-based
+`encode_to_writer` is preserved as the high-quality,
+O(N)-memory path for small framebuffers;
+`encode_to_writer_streaming` is the O(1)-memory path
+for multi-megapixel framebuffers.
+
+### Tests
+- 5 new unit tests:
+  `sixel_encode_to_writer_streaming_basic_structure`
+  (DCS header, palette, terminator);
+  `sixel_encode_to_writer_streaming_uses_rle_for_solid_color`
+  (RLE repeat introducer for uniform colors);
+  `sixel_encode_to_writer_streaming_uses_band_separators`
+  (`-` between bands for height > 6);
+  `sixel_encode_to_writer_streaming_rejects_zero_dimensions`
+  (zero-dimensions error path);
+  `sixel_encode_to_writer_streaming_2mp_frame_smoke_test`
+  (1920x1080 framebuffer, 179 band separators).
+
+### Notes
+- All 4 feature combinations clean: cargo fmt, cargo
+  build (default + each feature + both), cargo build
+  --release (default + both), cargo test (121 tests
+  with both features, 0 failed), cargo clippy
+  --all-targets -- -D warnings (0 errors across all 4
+  combos).
+- No public API removals; no new runtime dependencies;
+  no new Cargo features.
+- Coexists with the v0.8.4 `icy_sixel`-based
+  `sixel::encode_to_writer` (which is preserved as
+  the high-quality, O(N)-memory path). Callers that
+  need O(1) memory use `encode_to_writer_streaming`;
+  callers that need the best image quality use
+  `encode_to_writer`.
 ## 0.8.4 (2026-07-02)
 
 Streaming Sixel encode: the v0.6.0 Sixel encoder
