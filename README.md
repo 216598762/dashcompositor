@@ -53,6 +53,38 @@ sequences.
                        terminal stdout
 ```
 
+## Usage (library)
+
+The `dashcompositor` library exposes a `LayerStack` that the backend
+can drive at will. Layers are added with stable `LayerId` handles,
+and each entry's per-layer state — opacity, visibility, z-override,
+name — can be tweaked at any time:
+
+```rust
+use dashcompositor::{FrameBuffer, LayerStack, SolidColor};
+
+let mut stack = LayerStack::new();
+let bg = stack.push(SolidColor::new(0, 0, 0, 255).with_name("bg"));
+let fg = stack.push(SolidColor::new(255, 0, 0, 255).with_z(10));
+
+// Control at will.
+stack.get_mut(fg).unwrap().set_opacity(0.5);
+stack.get_mut(bg).unwrap().set_visible(false);
+
+// Render.
+let mut fb = FrameBuffer::new(80, 24);
+stack.render(&mut fb);
+
+// Remove and re-add.
+let _ = stack.remove(bg);
+let accent = stack.push(SolidColor::new(0, 255, 0, 255));
+stack.get_mut(accent).unwrap().set_z_override(100);
+```
+
+A custom `Compositor` can be plugged in via `LayerStack::render_with`;
+the default `CpuCompositor` is a zero-dependency reference
+implementation.
+
 ## Contributing
 
 Read [`AGENTS.md`](./AGENTS.md) first. Key rules:
