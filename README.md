@@ -160,6 +160,79 @@ anything other than an `UnsupportedProtocol` error.
 [`detect_with_probe`]: https://docs.rs/dashcompositor/latest/dashcompositor/encoder/fn.detect_with_probe.html
 [`Protocol`]: https://docs.rs/dashcompositor/latest/dashcompositor/enum.Protocol.html
 
+
+### Tmux passthrough (v0.8.0)
+
+When the host is running inside tmux, the Kitty graphics
+protocol needs its APC payload wrapped in a tmux passthrough
+DCS (`ESC P tmux ; ... ESC \`) so the bytes survive the
+tmux -> outer-terminal hop. `dashcompositor` does this
+automatically when **both** conditions are met:
+
+1. The env var `DASHPASSTHROUGH` is set to a non-empty value
+   (typically `DASHPASSTHROUGH=1`), AND
+2. The `TMUX` env var is set (the canonical signal that
+   we are inside a tmux session).
+
+The opt-in is explicit because tmux requires
+`set -g allow-passthrough on` in `~/.tmux.conf` for
+tmux 3.2+ (released 2021) to forward APC payloads -- a
+user with a stock tmux config would otherwise get
+corrupted output. Both conditions are required so a
+user with `DASHPASSTHROUGH` set in their shell rc on a
+non-tmux host does not get accidental double-wrapping.
+
+Enable with one of:
+
+```bash
+# In your shell rc (~/.bashrc, ~/.zshrc, etc.):
+export DASHPASSTHROUGH=1
+
+# Or per-invocation:
+DASHPASSTHROUGH=1 dashcompositor
+
+# Or via the CLI flag (the demo only):
+dashcompositor --tmux-passthrough
+```
+
+The CLI demo logs the resolved tmux-passthrough state
+to stderr so you can verify the opt-in was picked up:
+
+```
+$ dashcompositor --tmux-passthrough
+dashcompositor v0.8.0 -- multi-layer + auto-detect encoder: host terminal = 80 cols x 24 rows
+...
+requested protocol: auto; resolved: kitty
+tmux passthrough: enabled (DASHPASSTHROUGH=1)
+encoded 10268 bytes via kitty; writing to stdout
+```
+
+Without the opt-in, the v0.7.0 default is preserved:
+`TERM=tmux*` resolves to Sixel. The heuristic
+priority order is unchanged: `TERM_PROGRAM` still wins
+over `TERM`, and the COLORTERM tiebreaker still kicks
+in for unknown terminals.
+
+The `wrap_for_tmux` helper is also exported as a
+public function in case you want to wrap your own
+encoder output for tmux passthrough:
+
+```rust
+use dashcompositor::wrap_for_tmux;
+
+let raw_kitty = encoder.encode(&fb)?;
+let tmux_safe = wrap_for_tmux(raw_kitty);
+std::io::stdout().write_all(&tmux_safe)?;
+```
+
+The pure byte transform does no I/O and reads no
+env vars; the opt-in check is the caller's
+responsibility. See the
+[`wrap_for_tmux`] docs for the exact wrapping rules
+(inner-ESC doubling, prefix, suffix).
+
+[`wrap_for_tmux`]: https://docs.rs/dashcompositor/latest/dashcompositor/fn.wrap_for_tmux.html
+
 A custom `Compositor` can be plugged in via `LayerStack::render_with`;
 the default `CpuCompositor` is a zero-dependency reference
 implementation.

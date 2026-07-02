@@ -15,6 +15,8 @@ pub mod terminal;
 pub use compositor::{Compositor, CpuCompositor, LayerStack};
 #[cfg(feature = "kitty-encoder")]
 pub use encoder::detect_with_probe;
+#[cfg(feature = "kitty-encoder")]
+pub use encoder::wrap_for_tmux;
 pub use encoder::{detect, EncoderError, Protocol, ProtocolEncoder};
 pub use framebuffer::{blend_over, FrameBuffer};
 pub use geometry::Rect;

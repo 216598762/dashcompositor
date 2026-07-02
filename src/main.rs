@@ -19,6 +19,16 @@
 //!    to override; pass `--probe` to use the I/O-based Kitty
 //!    query-response probe) and write the escape sequences to
 //!    stdout. Stderr is reserved for human-readable logging.
+//!
+//! v0.8.0 adds `--tmux-passthrough`: when the host is running
+//! inside tmux, the Kitty arm wraps its APC output in a tmux
+//! passthrough DCS (ESC P tmux ; ... ESC \\) so the bytes
+//! survive the tmux -> outer-terminal hop. The opt-in env
+//! var is `DASHPASSTHROUGH` (any non-empty value, typically
+//! `DASHPASSTHROUGH=1`). The flag sets that env var
+//! before calling `detect` / `dispatch`, so the resulting
+//! protocol + wrapping decision matches the one a user would
+//! get by exporting the var themselves.
 
 use std::io::Write;
 
@@ -61,14 +71,81 @@ fn parse_probe_flag() -> bool {
     std::env::args().any(|a| a == "--probe")
 }
 
+/// Parse the `--tmux-passthrough` CLI flag (v0.8.0; boolean
+/// switch, no value). When set, the demo exports
+/// `DASHPASSTHROUGH=1` for the duration of `main` (restored
+/// on exit via the `DashPassthroughGuard` `Drop` impl) so the
+/// env-var check in `tmux_passthrough_enabled` triggers and
+/// the dispatch auto-wraps the Kitty output in the tmux
+/// passthrough DCS. This is a convenience wrapper around
+/// `DASHPASSTHROUGH=1 dashcompositor ...`; semantically
+/// equivalent to the env var.
+fn parse_tmux_passthrough_flag() -> bool {
+    std::env::args().any(|a| a == "--tmux-passthrough")
+}
+
+/// RAII guard for the `DASHPASSTHROUGH` env var set by
+/// `--tmux-passthrough`. Saves the current value on
+/// construction and restores it on `Drop`. Uses
+/// `std::env::set_var` / `std::env::remove_var` (the v0.7.1
+/// `with_env` test-helper pattern is parallel but lives
+/// inside the test module -- this is a single-env-var
+/// ad-hoc version for `main`).
+struct DashPassthroughGuard {
+    saved: Option<String>,
+}
+
+impl DashPassthroughGuard {
+    fn set(value: Option<&str>) -> Self {
+        let saved = std::env::var("DASHPASSTHROUGH").ok();
+        match value {
+            Some(v) => std::env::set_var("DASHPASSTHROUGH", v),
+            None => std::env::remove_var("DASHPASSTHROUGH"),
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for DashPassthroughGuard {
+    fn drop(&mut self) {
+        match self.saved.as_ref() {
+            Some(v) => std::env::set_var("DASHPASSTHROUGH", v),
+            None => std::env::remove_var("DASHPASSTHROUGH"),
+        }
+    }
+}
+
 fn main() {
     let size = TerminalSize::current();
     eprintln!(
-        "dashcompositor v0.7.1 -- multi-layer + auto-detect encoder: \
+        "dashcompositor v0.8.0 -- multi-layer + auto-detect encoder: \
 host terminal = {cols} cols x {rows} rows",
         cols = size.cols,
         rows = size.rows,
     );
+
+    // v0.8.0 tmux passthrough: parse the flag FIRST so the
+    // `DASHPASSTHROUGH` env var is set for the rest of
+    // `main` (including the `detect` / `detect_with_probe`
+    // calls below). The guard restores the previous value
+    // on `Drop` (i.e. on exit), so a shell that has
+    // `DASHPASSTHROUGH=1` exported in its rc is unaffected.
+    //
+    // IMPORTANT: only create the guard when the flag IS
+    // set. If we always create the guard, the
+    // `DashPassthroughGuard::set(None)` call would REMOVE
+    // the user's `DASHPASSTHROUGH` env var (replacing it
+    // with nothing), which would silently disable the
+    // passthrough for a user who exported the var in
+    // their shell rc but didn't pass `--tmux-passthrough`.
+    // The fix: when the flag is absent, do nothing --
+    // the user's existing env is respected as-is.
+    let tmux_passthrough = parse_tmux_passthrough_flag();
+    let _passthrough_guard = if tmux_passthrough {
+        Some(DashPassthroughGuard::set(Some("1")))
+    } else {
+        None
+    };
 
     let mut stack = LayerStack::new();
 
@@ -155,6 +232,14 @@ using the env-var shim instead"
         "requested protocol: {}; resolved: {}",
         requested.as_str(),
         resolved.as_str(),
+    );
+    eprintln!(
+        "tmux passthrough: {}",
+        if tmux_passthrough {
+            "enabled (DASHPASSTHROUGH=1)"
+        } else {
+            "disabled (set --tmux-passthrough or DASHPASSTHROUGH=1 to opt in)"
+        },
     );
 
     // 6. Encode the framebuffer to escape sequences and write

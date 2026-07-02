@@ -1,3 +1,161 @@
+## 0.8.0 (2026-07-02)
+
+tmux passthrough: the Kitty encoder now wraps its APC output in
+a tmux passthrough DCS (`ESC P tmux ; ... ESC \`) so the bytes
+survive the tmux -> outer-terminal hop when the host is running
+inside tmux. Opt-in via the new `DASHPASSTHROUGH` env var (any
+non-empty value, typically `DASHPASSTHROUGH=1`) or the new
+`--tmux-passthrough` CLI flag on the `main.rs` demo. The
+v0.7.0 default (`TERM=tmux*` -> Sixel) is preserved: without
+the opt-in, tmux users still get Sixel. The wrapping is
+opt-in because tmux requires `set -g allow-passthrough on`
+in `tmux.conf` for tmux 3.2+ to forward APC payloads -- a
+user with a stock tmux config would otherwise get corrupted
+output.
+
+### Added
+- `pub fn wrap_for_tmux(inner: Vec<u8>) -> Vec<u8>` in
+  `dashcompositor::encoder` (gated on the `kitty-encoder`
+  Cargo feature; re-exported as `dashcompositor::wrap_for_tmux`).
+  Pure byte transform: prepends `ESC P tmux ;` to the input,
+  doubles every inner `ESC` byte (so tmux 3.2+ passes them
+  through as a single literal `ESC` to the outer terminal),
+  and appends `ESC \`. No I/O, no env-var reads, fully
+  testable without tmux. Useful for downstream encoders
+  that want to wrap their own output for tmux passthrough.
+- `tmux_passthrough_enabled()` private helper in
+  `src/encoder.rs` (gated on `kitty-encoder`): returns
+  `true` when `DASHPASSTHROUGH` is set to a non-empty
+  value AND `TMUX` is set (the canonical signal that we
+  are inside a tmux session). Both conditions are required
+  so a user with `DASHPASSTHROUGH` set in their shell rc
+  on a non-tmux host does not get accidental double-wrapping.
+- `v0.8.0` entry in the `detect_with_env` heuristic: when
+  `TERM=tmux*` AND `DASHPASSTHROUGH` is set to a non-empty
+  value, pick `Protocol::Kitty` (the dispatch will then
+  auto-wrap). Without the opt-in, the v0.7.0 Sixel fallback
+  is preserved. `TERM_PROGRAM` still wins (a user with
+  `TERM_PROGRAM=wezterm` running inside tmux is using
+  wezterm, not native tmux-attached kitty passthrough).
+- `DASHPASSTHROUGH` as a 4th argument to
+  `pub(crate) fn detect_with_env(Option<&str>, Option<&str>,
+  Option<&str>, Option<&str>) -> Protocol`. `pub fn detect()`
+  reads it from the process environment. The empty-string
+  case is treated as "not opted in" (consistent with the
+  `is_some_and(|v| !v.is_empty())` check in
+  `tmux_passthrough_enabled`).
+- Auto-wrap in `dispatch(Protocol::Kitty, &frame)`: after
+  `kitty::encode` produces the raw APC bytes, the dispatch
+  checks `tmux_passthrough_enabled()` and, if true, calls
+  `kitty::wrap_for_tmux` to wrap the output. The check is
+  in `dispatch` (not in `detect`) so a user who passes
+  `--protocol kitty` directly still gets the passthrough
+  wrapping when opted in -- the heuristic would have
+  picked Sixel, but the explicit Kitty choice overrides.
+- `with_env` test helper in `src/encoder.rs` extended
+  with a 4th `dash_passthrough: Option<&str>` argument
+  and a 4th `EnvGuard` (RAII save/restore for
+  `DASHPASSTHROUGH`). The 5 existing call sites are
+  updated to pass `None` for the new arg. The
+  process-global env mutex + RAII guard pattern from
+  v0.7.1 is preserved, so the new tests are race-free
+  with the existing env-touching tests.
+- `main.rs` CLI: `--tmux-passthrough` flag (boolean
+  switch, no value). Sets `DASHPASSTHROUGH=1` for the
+  duration of `main` (restored on exit via the new
+  `DashPassthroughGuard` RAII helper that saves the
+  current value on construction and restores it on
+  `Drop`). The demo also logs the resolved tmux-passthrough
+  state (enabled/disabled) to stderr, so the user can
+  verify the opt-in was picked up.
+- 9 new unit tests in `src/encoder.rs` (all gated on
+  `kitty-encoder` for the encoder-touching ones, and on
+  the `EnvGuard` pattern for the env-touching ones):
+  - `detect_with_env_tmux_picks_kitty_with_dash_passthrough`
+    (heuristic: opt-in + `TERM=tmux*` -> Kitty; also
+    verifies `TERM_PROGRAM` still wins).
+  - `detect_with_env_tmux_picks_sixel_with_empty_or_missing_dash_passthrough`
+    (heuristic: no opt-in -> Sixel, preserving the v0.7.0
+    fallback for `TERM=tmux*`).
+  - `wrap_for_tmux_wraps_inner_apc_in_dcs_passthrough`
+    (pure byte transform: prefix, suffix, and length
+    arithmetic on a typical Kitty APC).
+  - `wrap_for_tmux_doubles_inner_esc_bytes` (pure byte
+    transform: a middle `ESC TEST` becomes `ESC ESC TEST`).
+  - `wrap_for_tmux_handles_empty_inner` (edge case: empty
+    input -> `ESC P tmux ; ESC \`, exactly 9 bytes).
+  - `wrap_for_tmux_leaves_non_esc_bytes_untouched`
+    (pure byte transform: no-ESC payloads pass through
+    verbatim).
+  - `dispatch_kitty_with_dash_passthrough_wraps_output`
+    (env-driven auto-wrap: `DASHPASSTHROUGH=1` + `TMUX`
+    set -> output starts with `ESC P tmux ;` and ends
+    with `ESC \`).
+  - `dispatch_kitty_without_dash_passthrough_does_not_wrap`
+    (env-driven auto-wrap disabled: v0.7.0 raw APC
+    output, even with `TERM=tmux-256color` and `TMUX` set).
+  - `dispatch_kitty_explicit_protocol_still_wraps_when_opted_in`
+    (explicit `Protocol::Kitty` with the opt-in + `TMUX`
+    set -> wraps, even when the heuristic would have
+    picked Sixel for `TERM=xterm-256color`).
+- `Cargo.toml`:
+  - Version bumped to `0.8.0`.
+  - The `little-kitty` comment was updated to remove
+    the now-incorrect "auto-detects tmux passthrough"
+    claim (verified during planning: `little_kitty` 0.0.3
+    does NOT auto-wrap; the wrapping is the caller's
+    responsibility, hence this v0.8.0 work). The new
+    comment says: "emits raw APC escape sequences
+    (passthrough wrapping is the v0.8.0 caller's
+    responsibility)".
+
+### Changed
+- `lib.rs` re-exports `dashcompositor::wrap_for_tmux`
+  (gated on `kitty-encoder`).
+- `with_env` test helper signature changed from
+  `(term, term_program, colorterm, f)` to
+  `(term, term_program, colorterm, dash_passthrough, f)`.
+  All 5 existing call sites updated to pass `None` for
+  the new arg. This is a test-only change; the public
+  API of `dashcompositor` is unchanged except for the
+  new `wrap_for_tmux` re-export.
+- `main.rs` version banner updated from `v0.7.1` to
+  `v0.8.0`. New tmux-passthrough log line added after
+  the "requested/resolved" log line.
+
+### Notes
+- `cargo build`, `cargo test`, `cargo fmt --check`,
+  `cargo clippy --all-targets -- -D warnings`, and
+  `cargo build --release` are all clean for ALL four
+  feature combinations: default, `--features
+  kitty-encoder`, `--features sixel-encoder`, and
+  `--features kitty-encoder,sixel-encoder`.
+- Test count per feature combo: default = 26, kitty-encoder
+  alone = 39, sixel-encoder alone = 28, both = 41 (+1
+  doc test). The bump from v0.7.1 (4/17/7/20) reflects
+  the 9 new v0.8.0 tests (2 heuristic + 4 wrap_for_tmux
+  + 3 dispatch) and the pre-existing per-encoder tests
+  that now exercise the 4-arg `detect_with_env` +
+  `with_env` signatures.
+- The opt-in is intentionally explicit. A user with
+  `set -g allow-passthrough on` in their `tmux.conf` is
+  the target audience; the explicit opt-in means a user
+  with a stock tmux config is unaffected (v0.7.0 Sixel
+  fallback preserved) and a user who actively wants
+  Kitty passthrough must consciously enable it (reducing
+  the blast radius of a misconfigured `tmux.conf`).
+- Nested tmux (tmux-in-tmux) is not yet supported: the
+  wrapping does not double-wrap. This is left for a
+  future v0.8.x; the workaround is to not nest tmux
+  sessions when using passthrough.
+- tmux < 3.2 has no `ESC ESC` escape mechanism and would
+  treat the inner `ESC \` as the outer passthrough
+  terminator (corrupting the sequence). The opt-in
+  documentation in README.md and CHANGELOG recommends
+  tmux 3.2+ (released 2021).
+- No public API removals; no new runtime dependencies;
+  no new Cargo features.
+
 ## 0.7.1 (2026-07-02)
 
 Patch release: hardens the `with_env` test helper with a

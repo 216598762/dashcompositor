@@ -16,8 +16,16 @@
 //! the Sixel arm via the optional
 //! [`icy_sixel`](https://crates.io/crates/icy_sixel) crate
 //! behind the `sixel-encoder` Cargo feature. v0.7.0 adds the
-//! auto-detect shim and the [`Protocol::Auto`] variant. Each
-//! arm returns [`EncoderError::UnsupportedProtocol`] when the
+//! auto-detect shim and the [`Protocol::Auto`] variant. v0.8.0
+//! adds tmux passthrough: when the host is running inside
+//! tmux and the user has opted in via the `DASHPASSTHROUGH`
+//! env var (or the `main.rs` `--tmux-passthrough` CLI flag),
+//! the Kitty arm wraps its APC output in a tmux passthrough
+//! DCS (`\x1bPtmux;...\x1b\\`) so the bytes survive the
+//! tmux -> outer-terminal hop. See [`kitty::wrap_for_tmux`]
+//! for the pure byte transform and [`tmux_passthrough_enabled`]
+//! for the opt-in check. Each arm returns
+//! [`EncoderError::UnsupportedProtocol`] when the
 //! corresponding feature is disabled in the current build.
 
 use crate::framebuffer::FrameBuffer;
@@ -126,9 +134,10 @@ impl From<icy_sixel::SixelError> for EncoderError {
 ///    -> `Protocol::Kitty`.
 /// 2. `TERM` (terminfo name): `xterm-kitty` / `foot` / `foot-*`
 ///    -> `Protocol::Kitty`; `tmux` / `tmux-*` ->
-///    `Protocol::Sixel` (Kitty via tmux needs passthrough
-///    setup; the current encoder does not handle it, so prefer
-///    Sixel when in tmux).
+///    `Protocol::Sixel` by default, or `Protocol::Kitty`
+///    when the `DASHPASSTHROUGH` env var is set
+///    (v0.8.0 tmux passthrough opt-in -- the dispatch
+///    then wraps the output in `\x1bPtmux;...\x1b\\`).
 /// 3. `COLORTERM` tiebreaker (weak signal): `truecolor` /
 ///    `24bit` -> `Protocol::Kitty` when `TERM` / `TERM_PROGRAM`
 ///    are inconclusive. Modern truecolor terminals are more
@@ -140,6 +149,7 @@ pub fn detect() -> Protocol {
         std::env::var("TERM").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),
         std::env::var("COLORTERM").ok().as_deref(),
+        std::env::var("DASHPASSTHROUGH").ok().as_deref(),
     )
 }
 
@@ -185,6 +195,7 @@ pub(crate) fn detect_with_env(
     term: Option<&str>,
     term_program: Option<&str>,
     colorterm: Option<&str>,
+    tmux_passthrough: Option<&str>,
 ) -> Protocol {
     // 1. TERM_PROGRAM wins (most specific -- set by the
     //    terminal application itself, not the terminfo
@@ -208,10 +219,19 @@ pub(crate) fn detect_with_env(
         if s == "foot" || s.starts_with("foot-") {
             return Protocol::Kitty;
         }
-        // tmux passthrough complicates Kitty; prefer Sixel.
-        // The encoder could be extended later to handle the
-        // tmux passthrough wrapping (`ESC Ptmux;...ESC \\`).
+        // v0.8.0 tmux passthrough: if the user has opted in
+        // via the `DASHPASSTHROUGH` env var (typically
+        // `DASHPASSTHROUGH=1`), we trust that they have
+        // `set -g allow-passthrough on` in their tmux.conf
+        // and pick Kitty -- the dispatch will auto-wrap the
+        // output in `\x1bPtmux;...\x1b\\` (see
+        // `wrap_for_tmux`). Without the opt-in we keep the
+        // v0.7.0 behaviour: prefer Sixel (the safest
+        // fallback for unknown terminals running inside tmux).
         if s == "tmux" || s.starts_with("tmux-") {
+            if tmux_passthrough.is_some_and(|v| !v.is_empty()) {
+                return Protocol::Kitty;
+            }
             return Protocol::Sixel;
         }
     }
@@ -238,6 +258,32 @@ pub trait ProtocolEncoder {
     fn encode(&self, frame: &FrameBuffer) -> Result<Vec<u8>, EncoderError>;
 }
 
+/// Returns `true` when the v0.8.0 tmux passthrough should
+/// be applied to the Kitty encoder's output. The check is
+/// pure (env vars only); the caller decides whether to
+/// wrap. Gated on `kitty-encoder` because the wrapping is
+/// only relevant for Kitty output.
+#[cfg(feature = "kitty-encoder")]
+fn tmux_passthrough_enabled() -> bool {
+    // `DASHPASSTHROUGH` is the v0.8.0 opt-in: any non-empty
+    // value enables passthrough. Typical usage is
+    // `DASHPASSTHROUGH=1`. The env var is also set by
+    // `main.rs`'s `--tmux-passthrough` CLI flag.
+    //
+    // `TMUX` is the canonical signal that we are actually
+    // inside a tmux session (it points to the tmux socket
+    // path; the tmux(1) man page documents it as set on
+    // every shell that tmux spawns). We require BOTH: the
+    // opt-in (so the user has consciously chosen passthrough
+    // and presumably has `set -g allow-passthrough on` in
+    // their tmux.conf) AND the `TMUX` env var (so we don't
+    // accidentally double-wrap a Kitty sequence for a
+    // non-tmux host that happens to have `DASHPASSTHROUGH`
+    // set in its shell rc).
+    std::env::var("DASHPASSTHROUGH").is_ok_and(|v| !v.is_empty())
+        && std::env::var_os("TMUX").is_some()
+}
+
 /// Private dispatch: the single source of truth for "given a
 /// `Protocol`, which encoder do I call?". Extracted out of the
 /// `ProtocolEncoder::encode` impl so the [`Protocol::Auto`]
@@ -246,7 +292,25 @@ pub trait ProtocolEncoder {
 fn dispatch(protocol: Protocol, frame: &FrameBuffer) -> Result<Vec<u8>, EncoderError> {
     match protocol {
         #[cfg(feature = "kitty-encoder")]
-        Protocol::Kitty => kitty::encode(frame),
+        Protocol::Kitty => {
+            // v0.8.0 tmux passthrough: when the host is
+            // running inside tmux AND the user has opted in
+            // via `DASHPASSTHROUGH=1` (or `--tmux-passthrough`),
+            // wrap the raw Kitty APC bytes in
+            // `\x1bPtmux;...\x1b\\` so they survive the
+            // tmux→outer-terminal hop. The opt-in is checked
+            // here (not in `detect`) because a user might
+            // pass `--protocol kitty` directly -- the
+            // heuristic would have picked Sixel, but the
+            // explicit Kitty choice should still get the
+            // passthrough wrapping.
+            let raw = kitty::encode(frame)?;
+            if tmux_passthrough_enabled() {
+                Ok(kitty::wrap_for_tmux(raw))
+            } else {
+                Ok(raw)
+            }
+        }
         #[cfg(not(feature = "kitty-encoder"))]
         Protocol::Kitty => {
             let _ = frame;
@@ -344,7 +408,51 @@ mod kitty {
         out.write_end(false)?;
         Ok(out)
     }
+
+    /// Wraps a complete Kitty APC (`\x1b_G ... \x1b\\`) in a
+    /// tmux passthrough DCS (`\x1bPtmux;...\x1b\\`) so the
+    /// bytes survive the tmux→outer-terminal hop. Required
+    /// because the user must opt in to
+    /// `set -g allow-passthrough on` in their tmux.conf for
+    /// tmux 3.2+ to forward APC payloads. Pure: no I/O, no
+    /// env-var reads. The `DASHPASSTHROUGH=1` opt-in is
+    /// checked by the caller (`dispatch`).
+    ///
+    /// Inner `\x1b` bytes are DOUBLED so tmux 3.2+ passes
+    /// them through as a single literal `\x1b` to the outer
+    /// terminal. The Kitty payload only contains `\x1b` at
+    /// the introducer (`\x1b_G`) and terminator (`\x1b\\`),
+    /// so the doubling only affects those two locations.
+    /// tmux 3.2+ (released 2021) is the floor; tmux < 3.2
+    /// has no escape mechanism and would treat the inner
+    /// `\x1b\\` as the outer passthrough terminator
+    /// (corrupting the sequence).
+    pub fn wrap_for_tmux(inner: Vec<u8>) -> Vec<u8> {
+        // Worst case: every byte is 0x1b -> doubled, plus the
+        // 7-byte prefix and 2-byte suffix.
+        let mut out: Vec<u8> = Vec::with_capacity(inner.len() * 2 + 9);
+        out.extend_from_slice(b"\x1bPtmux;");
+        for &b in &inner {
+            if b == 0x1b {
+                out.push(0x1b);
+                out.push(0x1b);
+            } else {
+                out.push(b);
+            }
+        }
+        out.push(0x1b);
+        out.push(b'\\');
+        out
+    }
 }
+
+// Re-export `wrap_for_tmux` at the `encoder` module level so
+// downstream users (and the `dashcompositor` crate root) can
+// call it without reaching into the private `kitty` submodule.
+// Gated on `kitty-encoder` because the helper is only useful
+// for Kitty output.
+#[cfg(feature = "kitty-encoder")]
+pub use kitty::wrap_for_tmux;
 
 /// The Sixel graphics protocol encoder, gated on the
 /// `sixel-encoder` Cargo feature. Implemented as a private
@@ -416,19 +524,28 @@ mod tests {
 
     #[test]
     fn detect_with_env_picks_kitty_for_term_program_kitty() {
-        assert_eq!(detect_with_env(None, Some("kitty"), None), Protocol::Kitty);
-        assert_eq!(detect_with_env(None, Some("Kitty"), None), Protocol::Kitty);
-        assert_eq!(detect_with_env(None, Some("KITTY"), None), Protocol::Kitty);
+        assert_eq!(
+            detect_with_env(None, Some("kitty"), None, None),
+            Protocol::Kitty
+        );
+        assert_eq!(
+            detect_with_env(None, Some("Kitty"), None, None),
+            Protocol::Kitty
+        );
+        assert_eq!(
+            detect_with_env(None, Some("KITTY"), None, None),
+            Protocol::Kitty
+        );
     }
 
     #[test]
     fn detect_with_env_picks_kitty_for_term_program_wezterm() {
         assert_eq!(
-            detect_with_env(None, Some("wezterm"), None),
+            detect_with_env(None, Some("wezterm"), None, None),
             Protocol::Kitty
         );
         assert_eq!(
-            detect_with_env(None, Some("WezTerm"), None),
+            detect_with_env(None, Some("WezTerm"), None, None),
             Protocol::Kitty
         );
     }
@@ -436,11 +553,11 @@ mod tests {
     #[test]
     fn detect_with_env_picks_kitty_for_term_program_ghostty() {
         assert_eq!(
-            detect_with_env(None, Some("ghostty"), None),
+            detect_with_env(None, Some("ghostty"), None, None),
             Protocol::Kitty
         );
         assert_eq!(
-            detect_with_env(None, Some("Ghostty"), None),
+            detect_with_env(None, Some("Ghostty"), None, None),
             Protocol::Kitty
         );
     }
@@ -448,20 +565,23 @@ mod tests {
     #[test]
     fn detect_with_env_picks_kitty_for_xterm_kitty() {
         assert_eq!(
-            detect_with_env(Some("xterm-kitty"), None, None),
+            detect_with_env(Some("xterm-kitty"), None, None, None),
             Protocol::Kitty
         );
     }
 
     #[test]
     fn detect_with_env_picks_kitty_for_foot_and_foot_extra() {
-        assert_eq!(detect_with_env(Some("foot"), None, None), Protocol::Kitty);
         assert_eq!(
-            detect_with_env(Some("foot-extra"), None, None),
+            detect_with_env(Some("foot"), None, None, None),
             Protocol::Kitty
         );
         assert_eq!(
-            detect_with_env(Some("foot-256color"), None, None),
+            detect_with_env(Some("foot-extra"), None, None, None),
+            Protocol::Kitty
+        );
+        assert_eq!(
+            detect_with_env(Some("foot-256color"), None, None, None),
             Protocol::Kitty
         );
     }
@@ -469,13 +589,16 @@ mod tests {
     #[test]
     fn detect_with_env_picks_sixel_for_tmux() {
         // tmux passthrough complicates Kitty; default to Sixel.
-        assert_eq!(detect_with_env(Some("tmux"), None, None), Protocol::Sixel);
         assert_eq!(
-            detect_with_env(Some("tmux-256color"), None, None),
+            detect_with_env(Some("tmux"), None, None, None),
             Protocol::Sixel
         );
         assert_eq!(
-            detect_with_env(Some("tmux-direct"), None, None),
+            detect_with_env(Some("tmux-256color"), None, None, None),
+            Protocol::Sixel
+        );
+        assert_eq!(
+            detect_with_env(Some("tmux-direct"), None, None, None),
             Protocol::Sixel
         );
     }
@@ -484,16 +607,16 @@ mod tests {
     fn detect_with_env_picks_sixel_for_xterm_256color() {
         // Conservative: unknown XTerm-like terminal -> Sixel.
         assert_eq!(
-            detect_with_env(Some("xterm-256color"), None, None),
+            detect_with_env(Some("xterm-256color"), None, None, None),
             Protocol::Sixel
         );
     }
 
     #[test]
     fn detect_with_env_picks_sixel_when_neither_set() {
-        assert_eq!(detect_with_env(None, None, None), Protocol::Sixel);
+        assert_eq!(detect_with_env(None, None, None, None), Protocol::Sixel);
         assert_eq!(
-            detect_with_env(Some(""), Some(""), Some("")),
+            detect_with_env(Some(""), Some(""), Some(""), None),
             Protocol::Sixel
         );
     }
@@ -503,14 +626,14 @@ mod tests {
         // TERM_PROGRAM is more specific than TERM; if the two
         // disagree, TERM_PROGRAM wins.
         assert_eq!(
-            detect_with_env(Some("xterm-256color"), Some("kitty"), None),
+            detect_with_env(Some("xterm-256color"), Some("kitty"), None, None),
             Protocol::Kitty
         );
         // And vice versa: a known Kitty TERM with a non-Kitty
         // TERM_PROGRAM (e.g. a wrapper script setting
         // TERM_PROGRAM) -- TERM_PROGRAM still wins.
         assert_eq!(
-            detect_with_env(Some("xterm-kitty"), Some("wezterm"), None),
+            detect_with_env(Some("xterm-kitty"), Some("wezterm"), None, None),
             Protocol::Kitty
         );
     }
@@ -520,7 +643,7 @@ mod tests {
         // A TERM_PROGRAM we don't recognise shouldn't block
         // detection -- fall through to TERM.
         assert_eq!(
-            detect_with_env(Some("xterm-kitty"), Some("apple-terminal"), None),
+            detect_with_env(Some("xterm-kitty"), Some("apple-terminal"), None, None),
             Protocol::Kitty
         );
     }
@@ -532,7 +655,7 @@ mod tests {
         // When TERM/TERM_PROGRAM are inconclusive but
         // COLORTERM=truecolor is set, lean Kitty.
         assert_eq!(
-            detect_with_env(Some("xterm-256color"), None, Some("truecolor")),
+            detect_with_env(Some("xterm-256color"), None, Some("truecolor"), None),
             Protocol::Kitty
         );
     }
@@ -540,7 +663,7 @@ mod tests {
     #[test]
     fn detect_with_env_colorterm_24bit_picks_kitty_for_unknown_term() {
         assert_eq!(
-            detect_with_env(Some("screen-256color"), None, Some("24bit")),
+            detect_with_env(Some("screen-256color"), None, Some("24bit"), None),
             Protocol::Kitty
         );
     }
@@ -550,7 +673,7 @@ mod tests {
         // COLORTERM should not override an already-known
         // Kitty terminal -- TERM_PROGRAM wins.
         assert_eq!(
-            detect_with_env(Some("xterm-kitty"), None, Some("truecolor")),
+            detect_with_env(Some("xterm-kitty"), None, Some("truecolor"), None),
             Protocol::Kitty
         );
     }
@@ -560,7 +683,7 @@ mod tests {
         // A non-truecolor COLORTERM value should not override
         // the Sixel default for unknown terminals.
         assert_eq!(
-            detect_with_env(Some("xterm"), None, Some("16color")),
+            detect_with_env(Some("xterm"), None, Some("16color"), None),
             Protocol::Sixel
         );
     }
@@ -644,16 +767,23 @@ mod tests {
 
     /// Panic-safe, race-free env-var fixture. Acquires the
     /// process-global env mutex, sets TERM / TERM_PROGRAM /
-    /// COLORTERM to the supplied values (or removes them if
-    /// `None`), runs the closure, then restores all three
-    /// env vars via the `EnvGuard` `Drop` impls (in reverse
-    /// order) and releases the mutex. The mutex serialises
-    /// env-touching tests so no two `with_env` calls can
-    /// snapshot each other's modified env vars.
+    /// COLORTERM / DASHPASSTHROUGH to the supplied values
+    /// (or removes them if `None`) AND clears `TMUX` to
+    /// a known unset state, runs the closure, then restores
+    /// all five env vars via the `EnvGuard` `Drop` impls
+    /// (in reverse order) and releases the mutex. The
+    /// mutex serialises env-touching tests so no two
+    /// `with_env` calls can snapshot each other's modified
+    /// env vars. The `TMUX` clear is unconditional so a
+    /// test that needs `TMUX` set (e.g. the v0.8.0 dispatch
+    /// auto-wrap tests) can set it inside the closure
+    /// without racing a shell-exported or parallel-test
+    /// `TMUX` value.
     fn with_env<F: FnOnce() -> R, R>(
         term: Option<&str>,
         term_program: Option<&str>,
         colorterm: Option<&str>,
+        dash_passthrough: Option<&str>,
         f: F,
     ) -> R {
         let _lock = env_lock();
@@ -663,10 +793,14 @@ mod tests {
         _program.set(term_program);
         let _colorterm = EnvGuard::new("COLORTERM");
         _colorterm.set(colorterm);
+        let _dash = EnvGuard::new("DASHPASSTHROUGH");
+        _dash.set(dash_passthrough);
+        let _tmux = EnvGuard::new("TMUX");
+        _tmux.set(None);
         f()
-        // _colorterm, _program, _term, _lock drop in reverse
-        // order, restoring all three env vars then releasing
-        // the mutex.
+        // _tmux, _dash, _colorterm, _program, _term, _lock
+        // drop in reverse order, restoring all five env
+        // vars then releasing the mutex.
     }
 
     #[cfg(feature = "kitty-encoder")]
@@ -681,7 +815,7 @@ mod tests {
         // only verified the dispatch terminates (no infinite
         // loop), not that the recursion actually resolves
         // correctly.
-        with_env(Some("xterm-kitty"), None, None, || {
+        with_env(Some("xterm-kitty"), None, None, None, || {
             let fb = FrameBuffer::new(2, 2);
             let bytes = dispatch(Protocol::Auto, &fb).unwrap();
             assert!(
@@ -702,7 +836,7 @@ mod tests {
         // starts with `\x1bP` (Sixel's DCS introducer). Catches
         // a regression that would make the recursion land in
         // the wrong arm on the Sixel side.
-        with_env(Some("tmux-256color"), None, None, || {
+        with_env(Some("tmux-256color"), None, None, None, || {
             let fb = FrameBuffer::new(2, 2);
             let bytes = dispatch(Protocol::Auto, &fb).unwrap();
             assert!(
@@ -721,7 +855,7 @@ mod tests {
 
     #[test]
     fn dispatch_auto_with_term_program_kitty_delegates_to_kitty() {
-        with_env(None, Some("kitty"), None, || {
+        with_env(None, Some("kitty"), None, None, || {
             // When kitty-encoder is on, dispatch should
             // produce Kitty escape bytes (start with
             // `\x1b_G`).
@@ -750,7 +884,7 @@ mod tests {
 
     #[test]
     fn dispatch_auto_with_term_tmux_delegates_to_sixel() {
-        with_env(Some("tmux-256color"), None, None, || {
+        with_env(Some("tmux-256color"), None, None, None, || {
             // When sixel-encoder is on, dispatch should
             // produce Sixel escape bytes (start with
             // `\x1bP`).
@@ -808,36 +942,67 @@ mod tests {
     #[cfg(feature = "kitty-encoder")]
     #[test]
     fn kitty_encode_produces_valid_escape_framing() {
-        let mut fb = FrameBuffer::new(2, 2);
-        for px in fb.pixels_mut() {
-            *px = [255, 0, 0, 255];
-        }
-        let bytes = Protocol::Kitty.encode(&fb).unwrap();
-        assert!(!bytes.is_empty());
-        assert!(bytes.starts_with(b"\x1b_G"));
-        assert!(bytes.ends_with(b"\x1b\\"));
-        let s = std::str::from_utf8(&bytes).unwrap_or("");
-        let payload_start = "\x1b_G".len();
-        let payload_end = s.find(';').unwrap_or(s.len());
-        let controls = &s[payload_start..payload_end];
-        for key in &["a=T", "f=32", "q=2", "s=2", "v=2"] {
-            assert!(
-                controls.contains(key),
-                "controls must include `{key}`, got: {controls:?}",
-            );
-        }
+        // v0.8.0: use `with_env(None, None, None, None, ...)`
+        // to acquire the env mutex and clear all four
+        // touchable env vars (TERM, TERM_PROGRAM, COLORTERM,
+        // DASHPASSTHROUGH) AND `TMUX`. This ensures the
+        // v0.8.0 auto-wrap in `dispatch(Protocol::Kitty, ...)`
+        // does NOT kick in (it requires `DASHPASSTHROUGH` and
+        // `TMUX` to both be set), so the test always sees
+        // the raw APC framing (`\x1b_G ... \x1b\\`). Using
+        // `with_env` (not manual `EnvGuard`s) is critical:
+        // it participates in the process-global env mutex
+        // that serialises all `with_env` tests, closing the
+        // parallel-test race that a previous attempt with
+        // manual `EnvGuard`s failed to close (the manual
+        // guards don't acquire the mutex, so a parallel
+        // `with_env` test could modify `DASHPASSTHROUGH` or
+        // `TMUX` between the guard creation and the encode
+        // call).
+        with_env(None, None, None, None, || {
+            let mut fb = FrameBuffer::new(2, 2);
+            for px in fb.pixels_mut() {
+                *px = [255, 0, 0, 255];
+            }
+            let bytes = Protocol::Kitty.encode(&fb).unwrap();
+            assert!(!bytes.is_empty());
+            assert!(bytes.starts_with(b"\x1b_G"));
+            assert!(bytes.ends_with(b"\x1b\\"));
+            let s = std::str::from_utf8(&bytes).unwrap_or("");
+            let payload_start = "\x1b_G".len();
+            let payload_end = s.find(';').unwrap_or(s.len());
+            let controls = &s[payload_start..payload_end];
+            for key in &["a=T", "f=32", "q=2", "s=2", "v=2"] {
+                assert!(
+                    controls.contains(key),
+                    "controls must include `{key}`, got: {controls:?}",
+                );
+            }
+        });
     }
 
     #[cfg(feature = "kitty-encoder")]
     #[test]
     fn kitty_encode_is_deterministic_for_same_input() {
-        let mut fb = FrameBuffer::new(3, 3);
-        for px in fb.pixels_mut() {
-            *px = [10, 20, 30, 255];
-        }
-        let a = Protocol::Kitty.encode(&fb).unwrap();
-        let b = Protocol::Kitty.encode(&fb).unwrap();
-        assert_eq!(a, b);
+        // v0.8.0: use `with_env(None, None, None, None, ...)`
+        // to acquire the env mutex and clear all env vars.
+        // See the comment on `kitty_encode_produces_valid_escape_framing`
+        // for why `with_env` (not manual `EnvGuard`s) is
+        // required: the manual guards don't acquire the
+        // mutex, so a parallel `with_env` test could
+        // modify `DASHPASSTHROUGH` or `TMUX` between the
+        // two `encode` calls, causing the first to wrap
+        // and the second to not wrap (or vice versa),
+        // breaking the determinism assertion.
+        with_env(None, None, None, None, || {
+            let mut fb = FrameBuffer::new(3, 3);
+            for px in fb.pixels_mut() {
+                *px = [10, 20, 30, 255];
+            }
+            let a = Protocol::Kitty.encode(&fb).unwrap();
+            let b = Protocol::Kitty.encode(&fb).unwrap();
+            assert_eq!(a, b);
+        });
     }
 
     #[cfg(feature = "sixel-encoder")]
@@ -894,7 +1059,7 @@ mod tests {
         // would block), but we can verify the function
         // returns quickly with the env-var result and doesn't
         // error.
-        with_env(None, Some("kitty"), None, || {
+        with_env(None, Some("kitty"), None, None, || {
             let proto = super::detect_with_probe().expect("probe short-circuits");
             assert_eq!(proto, Protocol::Kitty);
         });
@@ -924,5 +1089,225 @@ mod tests {
             through_trait, through_dispatch,
             "Protocol::Auto.encode must go through dispatch"
         );
+    }
+
+    // -- v0.8.0: tmux passthrough heuristic tests -----------------------
+    //
+    // The heuristic lives in `detect_with_env` and is unit-tested
+    // here without the env-mutex plumbing (it does not touch
+    // any process state).
+
+    #[test]
+    fn detect_with_env_tmux_picks_kitty_with_dash_passthrough() {
+        // v0.8.0: when the user opts in via DASHPASSTHROUGH
+        // (any non-empty value) AND TERM=tmux*, the heuristic
+        // picks Kitty (the dispatch will then auto-wrap).
+        assert_eq!(
+            detect_with_env(Some("tmux"), None, None, Some("1")),
+            Protocol::Kitty
+        );
+        assert_eq!(
+            detect_with_env(Some("tmux-256color"), None, None, Some("1")),
+            Protocol::Kitty
+        );
+        assert_eq!(
+            detect_with_env(Some("tmux-direct"), None, None, Some("yes")),
+            Protocol::Kitty
+        );
+        // TERM_PROGRAM still wins (a user with TERM_PROGRAM=wezterm
+        // running inside tmux is using wezterm, not native
+        // tmux-attached kitty passthrough).
+        assert_eq!(
+            detect_with_env(Some("tmux-256color"), Some("wezterm"), None, Some("1")),
+            Protocol::Kitty
+        );
+    }
+
+    #[test]
+    fn detect_with_env_tmux_picks_sixel_with_empty_or_missing_dash_passthrough() {
+        // The opt-in is required: empty or absent DASHPASSTHROUGH
+        // keeps the v0.7.0 Sixel fallback.
+        assert_eq!(
+            detect_with_env(Some("tmux-256color"), None, None, None),
+            Protocol::Sixel
+        );
+        assert_eq!(
+            detect_with_env(Some("tmux-256color"), None, None, Some("")),
+            Protocol::Sixel
+        );
+        // The opt-in check is `is_some_and(|v| !v.is_empty())`:
+        // any non-empty value (including `"0"`, `"false"`, etc.)
+        // enables the opt-in. This is intentional: a user who
+        // explicitly sets `DASHPASSTHROUGH=0` in their shell
+        // is making a conscious decision, and the simplest
+        // interpretation is "I have set the variable, so my
+        // intent is to opt in". A user who wants to opt out
+        // should simply unset the variable. (Compare to
+        // shell `set -e`: there is no "disable" sentinel --
+        // the variable's presence is the opt-in.) This
+        // assertion documents and locks in that semantics.
+        assert_eq!(
+            detect_with_env(Some("tmux-256color"), None, None, Some("0")),
+            Protocol::Kitty
+        );
+    }
+
+    // -- v0.8.0: wrap_for_tmux pure-function unit tests -----------------
+    //
+    // These test the pure byte transform `kitty::wrap_for_tmux`.
+    // No env vars, no FrameBuffer: just bytes in, bytes out.
+
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn wrap_for_tmux_wraps_inner_apc_in_dcs_passthrough() {
+        // A typical Kitty APC payload -- introducer + controls
+        // + base64 payload + terminator -- must come out
+        // wrapped in the `ESC P tmux ; ... ESC \` DCS.
+        let inner: Vec<u8> = b"\x1b_Ga=T,f=32,q=2,s=2,v=2;AAAA\x1b\\".to_vec();
+        // `wrap_for_tmux` takes `inner` by value (consumes it),
+        // so clone first to keep the length for the assertion.
+        let inner_len = inner.len();
+        let wrapped = super::kitty::wrap_for_tmux(inner);
+        // The DCS prefix is `ESC P tmux ;` (7 bytes).
+        assert!(wrapped.starts_with(b"\x1bPtmux;"));
+        // The DCS terminator is `ESC \` (2 bytes).
+        assert!(wrapped.ends_with(b"\x1b\\"));
+        // The total length is inner + 7 (prefix) + 2 (suffix) + 2
+        // (two extra ESC bytes from doubling the introducer and
+        // terminator).
+        assert_eq!(wrapped.len(), inner_len + 7 + 2 + 2);
+    }
+
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn wrap_for_tmux_doubles_inner_esc_bytes() {
+        // An inner byte sequence containing ESC bytes (not at
+        // the introducer or terminator) must have those ESC
+        // bytes doubled. tmux 3.2+ treats `ESC ESC` as a
+        // single literal ESC in the inner payload.
+        let inner: Vec<u8> = b"\x1b_Ga=T\x1bTEST\x1b\\".to_vec();
+        let wrapped = super::kitty::wrap_for_tmux(inner.clone());
+        // The middle `ESC TEST` becomes `ESC ESC TEST` in the
+        // wrapped output.
+        let expected_middle = b"\x1b\x1bTEST";
+        // Find the middle section in the wrapped output.
+        let middle_pos = wrapped
+            .windows(expected_middle.len())
+            .position(|w| w == expected_middle)
+            .expect("doubled ESC TEST must appear in wrapped output");
+        // The doubled ESC is preceded by a semicolon and a=T
+        // and followed by TEST.
+        assert!(middle_pos > 0);
+        assert!(middle_pos + expected_middle.len() < wrapped.len());
+    }
+
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn wrap_for_tmux_handles_empty_inner() {
+        // Edge case: an empty inner payload still produces
+        // a valid (but empty) wrapped DCS -- `ESC P tmux ;
+        // ESC \`. This should not panic and should produce
+        // exactly the 9-byte empty-passthrough sequence.
+        let wrapped = super::kitty::wrap_for_tmux(Vec::new());
+        assert_eq!(wrapped, b"\x1bPtmux;\x1b\\");
+    }
+
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn wrap_for_tmux_leaves_non_esc_bytes_untouched() {
+        // Non-ESC bytes in the inner payload pass through
+        // verbatim (no doubling, no transformation). Build
+        // a payload with no ESC bytes, then assert the
+        // wrapped output equals prefix + inner + suffix.
+        let inner: Vec<u8> = b"hello world, no escapes here".to_vec();
+        let wrapped = super::kitty::wrap_for_tmux(inner.clone());
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"\x1bPtmux;");
+        expected.extend_from_slice(&inner);
+        expected.push(0x1b);
+        expected.push(b'\\');
+        assert_eq!(wrapped, expected);
+    }
+
+    // -- v0.8.0: dispatch + tmux-passthrough wiring tests ---------------
+    //
+    // These test the env-driven auto-wrap in `dispatch`. They
+    // run the env-mutex-serialised `with_env` helper so they
+    // are race-free with the other env-touching tests.
+
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn dispatch_kitty_with_dash_passthrough_wraps_output() {
+        // When kitty-encoder is on AND DASHPASSTHROUGH is
+        // set AND the host is inside tmux (TMUX env var
+        // present), the dispatch should wrap the Kitty
+        // APC output in the tmux passthrough DCS. The
+        // wrapper is `ESC P tmux ; ... ESC \`.
+        with_env(Some("tmux-256color"), None, None, Some("1"), || {
+            // TMUX must also be set for the auto-wrap to
+            // kick in (the `tmux_passthrough_enabled` check
+            // requires BOTH DASHPASSTHROUGH and TMUX).
+            let _tmux = EnvGuard::new("TMUX");
+            _tmux.set(Some("/tmp/tmux-1000/default,12345,0"));
+            let fb = FrameBuffer::new(2, 2);
+            let bytes = dispatch(Protocol::Kitty, &fb).unwrap();
+            // The wrapped output starts with the DCS prefix
+            // and ends with the DCS terminator; the inner
+            // APC introducer (`\x1b_G`) is still present
+            // (but as `\x1b\x1b_G` because ESC was doubled).
+            assert!(
+                bytes.starts_with(b"\x1bPtmux;"),
+                "Kitty dispatch with DASHPASSTHROUGH+TMUX must wrap; got prefix: {:?}",
+                &bytes[..bytes.len().min(12)],
+            );
+            assert!(bytes.ends_with(b"\x1b\\"));
+        });
+    }
+
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn dispatch_kitty_without_dash_passthrough_does_not_wrap() {
+        // When DASHPASSTHROUGH is not set, the dispatch
+        // produces raw Kitty APC bytes (no wrapping),
+        // even if the user is inside tmux. This is the
+        // v0.7.0 backwards-compat default.
+        with_env(Some("tmux-256color"), None, None, None, || {
+            let _tmux = EnvGuard::new("TMUX");
+            _tmux.set(Some("/tmp/tmux-1000/default,12345,0"));
+            let fb = FrameBuffer::new(2, 2);
+            let bytes = dispatch(Protocol::Kitty, &fb).unwrap();
+            // Raw Kitty APC starts with `\x1b_G` (NOT
+            // `\x1bPtmux;`).
+            assert!(
+                bytes.starts_with(b"\x1b_G"),
+                "Kitty dispatch without DASHPASSTHROUGH must NOT wrap; got prefix: {:?}",
+                &bytes[..bytes.len().min(12)],
+            );
+            assert!(!bytes.starts_with(b"\x1bPtmux;"));
+        });
+    }
+
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn dispatch_kitty_explicit_protocol_still_wraps_when_opted_in() {
+        // When the user passes `--protocol kitty` (so
+        // `dispatch` is called with `Protocol::Kitty`
+        // directly, bypassing the heuristic) AND the
+        // opt-in is set AND TMUX is set, the wrap
+        // still happens. This is the "explicit protocol
+        // overrides the heuristic" use case: a user
+        // with a known-good tmux + Kitty setup who
+        // wants to force Kitty regardless of TERM.
+        with_env(Some("xterm-256color"), None, None, Some("1"), || {
+            let _tmux = EnvGuard::new("TMUX");
+            _tmux.set(Some("/tmp/tmux-1000/default,12345,0"));
+            let fb = FrameBuffer::new(2, 2);
+            let bytes = dispatch(Protocol::Kitty, &fb).unwrap();
+            assert!(
+                bytes.starts_with(b"\x1bPtmux;"),
+                "Explicit Protocol::Kitty with DASHPASSTHROUGH+TMUX must wrap; got prefix: {:?}",
+                &bytes[..bytes.len().min(12)],
+            );
+        });
     }
 }

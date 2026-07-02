@@ -1,6 +1,6 @@
 [package]
 name = "dashcompositor"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "Layer-based graphics compositor for the terminal (Kitty graphics protocol / Sixel)"
 license = "MIT"
@@ -41,7 +41,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # evaluation (March 2026, version 0.0.3, MIT/Apache-2.0, ~1K
 # downloads, ~148K SLoC, actively maintained): a low-level
 # interface for the Kitty graphics protocol; supports sprite and
-# Unicode placeholder modes; auto-detects tmux passthrough.
+# Unicode placeholder modes; emits raw APC escape sequences (passthrough wrapping is the v0.8.0 caller's responsibility).
 little-kitty = { version = "0.0.3", optional = true }
 # `icy_sixel` is the v0.6.0 second encoder. Per the crates.io
 # evaluation: 100% pure-Rust SIXEL encoder/decoder, MIT/Apache-2.0,
