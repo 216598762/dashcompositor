@@ -8,9 +8,12 @@
 //!
 //! v0.5.0 wires up the Kitty arm via the optional
 //! [`little_kitty`](https://crates.io/crates/little-kitty) crate
-//! behind the `kitty-encoder` Cargo feature. Sixel is not yet
-//! implemented -- calling `encode` on `Protocol::Sixel` returns
-//! [`EncoderError::UnsupportedProtocol`] and is the v0.6.0 work.
+//! behind the `kitty-encoder` Cargo feature. v0.6.0 wires up the
+//! Sixel arm via the optional
+//! [`icy_sixel`](https://crates.io/crates/icy_sixel) crate behind
+//! the `sixel-encoder` Cargo feature. Each arm returns
+//! [`EncoderError::UnsupportedProtocol`] when the corresponding
+//! feature is disabled in the current build.
 
 use crate::framebuffer::FrameBuffer;
 
@@ -40,8 +43,8 @@ impl Protocol {
 pub enum EncoderError {
     /// The requested protocol is not compiled into this build
     /// (e.g. calling `encode` on `Protocol::Kitty` without the
-    /// `kitty-encoder` feature, or on `Protocol::Sixel` until the
-    /// Sixel encoder lands in v0.6.0).
+    /// `kitty-encoder` feature, or on `Protocol::Sixel` without
+    /// the `sixel-encoder` feature).
     UnsupportedProtocol(&'static str),
 
     /// The framebuffer has zero width or height and cannot be
@@ -74,6 +77,28 @@ impl std::fmt::Display for EncoderError {
 
 impl std::error::Error for EncoderError {}
 
+// `From` impls for the underlying encoder-crate error types.
+// Gated on the respective features so a build that doesn't pull
+// in the crate can't reference its error type. The shared shape
+// `EncoderError::Encode(String)` lets the per-encoder `encode`
+// functions use `?` directly without per-module helper closures
+// (the v0.5.0 `io_err` / v0.6.0 `sixel_err` helpers have been
+// removed in favour of this pattern).
+
+#[cfg(feature = "kitty-encoder")]
+impl From<std::io::Error> for EncoderError {
+    fn from(e: std::io::Error) -> Self {
+        EncoderError::Encode(e.to_string())
+    }
+}
+
+#[cfg(feature = "sixel-encoder")]
+impl From<icy_sixel::SixelError> for EncoderError {
+    fn from(e: icy_sixel::SixelError) -> Self {
+        EncoderError::Encode(e.to_string())
+    }
+}
+
 /// Encodes a [`FrameBuffer`] into the byte stream a terminal
 /// expects for a chosen [`Protocol`].
 ///
@@ -90,7 +115,13 @@ impl ProtocolEncoder for Protocol {
             #[cfg(feature = "kitty-encoder")]
             Protocol::Kitty => kitty::encode(frame),
             #[cfg(not(feature = "kitty-encoder"))]
-            Protocol::Kitty => Err(EncoderError::UnsupportedProtocol("kitty")),
+            Protocol::Kitty => {
+                let _ = frame;
+                Err(EncoderError::UnsupportedProtocol("kitty"))
+            },
+            #[cfg(feature = "sixel-encoder")]
+            Protocol::Sixel => sixel::encode(frame),
+            #[cfg(not(feature = "sixel-encoder"))]
             Protocol::Sixel => {
                 let _ = frame;
                 Err(EncoderError::UnsupportedProtocol("sixel"))
@@ -109,13 +140,6 @@ mod kitty {
     use little_kitty::command::ControlValue;
     use little_kitty::io::KittyCommandWriter;
     use std::io::Write;
-
-    /// Convert a `std::io::Error` from the `little_kitty` writer
-    /// into our [`EncoderError::Encode`]. Local helper so the
-    /// `encode` function below stays readable.
-    fn io_err(e: std::io::Error) -> EncoderError {
-        EncoderError::Encode(e.to_string())
-    }
 
     /// Encodes `frame` as a single Kitty "transmit and display"
     /// command using raw RGBA pixel data (format code 32 per the
@@ -152,18 +176,60 @@ mod kitty {
         ];
 
         let mut out = Vec::new();
-        out.write_start(false, None).map_err(io_err)?;
+        out.write_start(false, None)?;
         for (i, (key, value)) in controls.iter().enumerate() {
             if i > 0 {
-                out.write_all(b",").map_err(io_err)?;
+                out.write_all(b",")?;
             }
-            write!(out, "{key}=").map_err(io_err)?;
-            value.write(&mut out).map_err(io_err)?;
+            write!(out, "{key}=")?;
+            value.write(&mut out)?;
         }
-        out.write_all(b";").map_err(io_err)?;
-        out = out.write_base64(&rgba).map_err(io_err)?;
-        out.write_end(false).map_err(io_err)?;
+        out.write_all(b";")?;
+        // write_base64 consumes the writer by value (returns Self)
+        // and Base64-encodes the payload per the Kitty graphics protocol.
+        // TODO(v0.5.x): chunk large images (m=0 more-chunks / m=1 last chunk)
+        // to support multi-megapixel framebuffers; the current single-command
+        // encoder will hit terminal size limits for very large frames.
+        out = out.write_base64(&rgba)?;
+        out.write_end(false)?;
         Ok(out)
+    }
+}
+
+/// The Sixel graphics protocol encoder, gated on the
+/// `sixel-encoder` Cargo feature. Implemented as a private inline
+/// module so the public API surface stays minimal.
+#[cfg(feature = "sixel-encoder")]
+mod sixel {
+    use super::EncoderError;
+    use crate::framebuffer::FrameBuffer;
+    use icy_sixel::SixelImage;
+
+    /// Encodes `frame` as a Sixel DCS (Device Control String)
+    /// escape sequence. The returned bytes are the full
+    /// terminal-ready payload: `\x1bPq...sixel data...\x1b\\`.
+    /// `icy_sixel` does the color quantization and sixel-data
+    /// serialisation; we just hand it the RGBA pixels and pass
+    /// through the resulting string.
+    pub fn encode(frame: &FrameBuffer) -> Result<Vec<u8>, EncoderError> {
+        if frame.width() == 0 || frame.height() == 0 {
+            return Err(EncoderError::InvalidDimensions {
+                width: frame.width(),
+                height: frame.height(),
+            });
+        }
+
+        // Materialise the RGBA pixel data as a single contiguous
+        // byte slice. `icy_sixel` takes owned bytes.
+        let rgba: Vec<u8> = frame.pixels().iter().flatten().copied().collect();
+
+        // `SixelImage::from_rgba` takes `usize` width/height; the
+        // `u32` values from FrameBuffer are always representable
+        // in `usize` on every supported platform (a widening,
+        // lossless cast).
+        let image = SixelImage::from_rgba(rgba, frame.width() as usize, frame.height() as usize);
+        let sixel_string = image.encode()?;
+        Ok(sixel_string.into_bytes())
     }
 }
 
@@ -187,11 +253,12 @@ mod tests {
         assert_eq!(e.to_string(), "framebuffer has invalid dimensions: 0x5");
     }
 
+    #[cfg(not(feature = "sixel-encoder"))]
     #[test]
-    fn sixel_encode_is_unsupported_in_v050() {
-        // Sixel is the v0.6.0 work; the encoder must return
-        // UnsupportedProtocol for any input, including a valid
-        // framebuffer.
+    fn sixel_encode_is_unsupported_without_feature() {
+        // When the sixel-encoder feature is off, the Sixel arm
+        // must return UnsupportedProtocol instead of producing
+        // a (non-existent) encoder.
         let fb = FrameBuffer::new(2, 2);
         let err = Protocol::Sixel.encode(&fb).unwrap_err();
         assert_eq!(err, EncoderError::UnsupportedProtocol("sixel"));
@@ -284,6 +351,87 @@ mod tests {
         }
         let a = Protocol::Kitty.encode(&fb).unwrap();
         let b = Protocol::Kitty.encode(&fb).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_rejects_zero_dimensions() {
+        let fb_zero_w = FrameBuffer::new(0, 5);
+        let fb_zero_h = FrameBuffer::new(5, 0);
+        let fb_zero_both = FrameBuffer::new(0, 0);
+        for fb in [&fb_zero_w, &fb_zero_h, &fb_zero_both] {
+            let err = Protocol::Sixel.encode(fb).unwrap_err();
+            assert!(matches!(err, EncoderError::InvalidDimensions { .. }));
+        }
+    }
+
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_produces_valid_dcs_framing() {
+        // 2x2 fully-opaque red framebuffer.
+        let mut fb = FrameBuffer::new(2, 2);
+        for px in fb.pixels_mut() {
+            *px = [255, 0, 0, 255];
+        }
+        let bytes = Protocol::Sixel.encode(&fb).unwrap();
+        assert!(!bytes.is_empty(), "encoded output must not be empty");
+        // Sixel is wrapped in a DCS (Device Control String)
+        // introducer `\x1bP` and ends with the ST (String
+        // Terminator) `\x1b\\`. See
+        // https://en.wikipedia.org/wiki/Sixel
+        assert!(
+            bytes.starts_with(b"\x1bP"),
+            "encoded output must start with the Sixel DCS introducer (\\x1bP), got: {:?}",
+            &bytes[..bytes.len().min(8)],
+        );
+        assert!(
+            bytes.ends_with(b"\x1b\\"),
+            "encoded output must end with the DCS ST terminator (\\x1b\\\\), got tail: {:?}",
+            &bytes[bytes.len().saturating_sub(8)..],
+        );
+        // The Sixel format-string mode letter `q` must appear
+        // somewhere between the DCS introducer and the first
+        // colour-definition introducer `#`. The exact position
+        // may vary if pixel-aspect-ratio parameters are present,
+        // so we just check the ordering rather than an exact
+        // prefix.
+        let header_end = bytes.iter().position(|&b| b == b'#').unwrap_or(bytes.len());
+        let header = &bytes[..header_end];
+        assert!(
+            header.contains(&b'q'),
+            "Sixel header must contain the `q` mode letter before the first `#`, got: {:?}",
+            std::str::from_utf8(header).unwrap_or("<non-utf8>"),
+        );
+        // Best-effort: the output should be non-trivially longer
+        // than just the 4-byte framing (`\x1bP` + `\x1b\\`), to
+        // catch a regression where the encoder emits no actual
+        // pixel data.
+        assert!(
+            bytes.len() > 16,
+            "encoded output must contain real pixel data (got {} bytes)",
+            bytes.len(),
+        );
+        // Best-effort: the payload should mention the 2x2
+        // dimensions somewhere in the raster attributes or data.
+        let s = std::str::from_utf8(&bytes).unwrap_or("");
+        assert!(
+            s.contains('2'),
+            "encoded output should reference the 2x2 dimensions, got: {s:?}",
+        );
+    }
+
+    #[cfg(feature = "sixel-encoder")]
+    #[test]
+    fn sixel_encode_is_deterministic_for_same_input() {
+        // Two calls with the same input must produce identical
+        // bytes (the encoder is pure with respect to the frame).
+        let mut fb = FrameBuffer::new(3, 3);
+        for px in fb.pixels_mut() {
+            *px = [10, 20, 30, 255];
+        }
+        let a = Protocol::Sixel.encode(&fb).unwrap();
+        let b = Protocol::Sixel.encode(&fb).unwrap();
         assert_eq!(a, b);
     }
 }

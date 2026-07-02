@@ -137,6 +137,7 @@ let id = stack.push(img);
 
 | Feature          | Default | Pulls in          | Enables                        |
 | ---------------- | :-----: | ----------------- | ------------------------------ |
+| `sixel-encoder`   |   off   | `icy_sixel = "0.5"`    | `Protocol::Sixel` produces real Sixel DCS escape sequences  |
 | `kitty-encoder`   |   off   | `little-kitty = "0.0.3"` | `Protocol::Kitty` produces real Kitty escape sequences |
 | `image-decoder`  |   off   | `image = "0.25"`  | `ImageLayer` (PNG + JPEG)      |
 

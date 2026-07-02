@@ -1,3 +1,79 @@
+## 0.6.0 (2026-07-02)
+
+Second protocol encoder: the Sixel graphics protocol, wired up via
+the optional `icy_sixel` (v0.5) crate behind a new
+`sixel-encoder` Cargo feature. The Kitty encoder from v0.5.0
+remains; both arms of `ProtocolEncoder::encode` are now real when
+their respective features are enabled.
+
+### Added
+- `icy_sixel = "0.5"` as an optional dependency, gated behind
+  the new `sixel-encoder` Cargo feature (default off).
+- Private `sixel` submodule in `src/encoder.rs`, paralleling the
+  `kitty` submodule. Uses the real `icy_sixel` 0.5 API:
+  - `SixelImage::from_rgba(rgba, w, h)` to wrap the framebuffer's
+    RGBA pixels (the `u32` width/height from `FrameBuffer` are
+    widened to `usize` via a lossless `as` cast, which is sound
+    on every supported platform).
+  - `.encode() -> Result<String, SixelError>` to produce the
+    full DCS-wrapped Sixel string (`\x1bPq...<sixel data>...\x1b\\`).
+  - `.into_bytes()` to convert the `String` to the `Vec<u8>`
+    return type.
+- `From<std::io::Error> for EncoderError` (gated on
+  `kitty-encoder`) and `From<icy_sixel::SixelError> for
+  EncoderError` (gated on `sixel-encoder`). These let both
+  `kitty::encode` and `sixel::encode` use `?` directly instead of
+  a per-module `.map_err(helper)?` pattern. The v0.5.0 `io_err`
+  and v0.6.0 `sixel_err` local helpers have been removed in
+  favour of the `From` impls; the pattern is now ready to scale
+  to the v0.7.0 auto-detect work.
+- 3 new Sixel tests mirroring the Kitty test suite:
+  - `sixel_encode_rejects_zero_dimensions`
+  - `sixel_encode_produces_valid_dcs_framing` -- strengthened
+    against the same class of regression as the Kitty framing
+    test: checks `starts_with(b"\x1bP")`, `ends_with(b"\x1b\\")`,
+    the `q` mode letter appears before the first `#`
+    colour-definition introducer, the output is longer than 16
+    bytes (catches an empty-payload regression), and the
+    2x2 dimensions are referenced in the output.
+  - `sixel_encode_is_deterministic_for_same_input`
+- The stale `sixel_encode_is_unsupported_in_v050` test was
+  renamed to `sixel_encode_is_unsupported_without_feature` and
+  re-gated on `not(feature = "sixel-encoder")` to mirror the
+  existing Kitty `kitty_encode_is_unsupported_without_feature`
+  pattern.
+
+### Changed
+- `Cargo.toml` version bumped to 0.6.0; `sixel-encoder` feature
+  added; `icy_sixel` optional dep added (see AGENTS.md §3
+  evaluation: pure-Rust SIXEL encoder/decoder, MIT/Apache-2.0,
+  actively maintained, the de-facto Rust SIXEL library).
+- The `Protocol::Sixel` arm of `ProtocolEncoder` now dispatches
+  to `sixel::encode` when the `sixel-encoder` feature is on, and
+  returns `Err(UnsupportedProtocol("sixel"))` otherwise -- the
+  same shape as the Kitty arm.
+- The `EncoderError::Encode` variant's Display message is
+  unchanged, but it's now reachable via `?` from both encoder
+  submodules via the new `From` impls.
+- The encoder module's doc comment was updated to mention the
+  v0.6.0 Sixel work and the per-feature `UnsupportedProtocol`
+  return.
+
+### Notes
+- `cargo build`, `cargo test` (4 unit tests with default
+  features, 6 with `--features kitty-encoder` alone, 6 with
+  `--features sixel-encoder` alone, 8 with
+  `--features kitty-encoder,sixel-encoder`; +1 doc test),
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  and `cargo build --release` are all clean for ALL four
+  feature combinations.
+- The `From` impl pattern is the recommended one for future
+  encoders (e.g. the v0.7.0 `rasteroid` auto-detect): add a
+  `From<NewError> for EncoderError` and the new encoder can use
+  `?` directly without a per-module error helper.
+- `icy_sixel` was chosen over `sixel`/`sixel-sys` (the latter is
+  FFI to the C `libsixel` and has not had a 2026 release).
+
 ## 0.5.0 (2026-07-02)
 
 First protocol encoder: the Kitty graphics protocol, wired up via
