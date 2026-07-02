@@ -13,7 +13,9 @@ pub mod layer;
 pub mod terminal;
 
 pub use compositor::{Compositor, CpuCompositor, LayerStack};
-pub use encoder::{EncoderError, Protocol, ProtocolEncoder};
+pub use encoder::{detect, EncoderError, Protocol, ProtocolEncoder};
+#[cfg(feature = "kitty-encoder")]
+pub use encoder::detect_with_probe;
 pub use framebuffer::{blend_over, FrameBuffer};
 pub use geometry::Rect;
 pub use layer::{Layer, LayerEntry, LayerId, RectLayer, SolidColor, TextLayer};

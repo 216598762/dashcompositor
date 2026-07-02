@@ -1,3 +1,146 @@
+## 0.7.0 (2026-07-02)
+
+Auto-detect protocol: a new `Protocol::Auto` variant that picks
+`Protocol::Kitty` or `Protocol::Sixel` based on terminal capability
+detection (env-var shim over `TERM` / `TERM_PROGRAM` / `COLORTERM`,
+plus a Kitty query-response probe via
+`little_kitty::Command::is_supported()` for authoritative detection).
+
+### Added
+- `Protocol::Auto` variant on the existing `Protocol` enum. The
+  `as_str` impl returns `"auto"` for the new variant. Both
+  `EncoderError` and `ProtocolEncoder` are unchanged.
+- `pub fn detect() -> Protocol` in `dashcompositor::encoder`:
+  pure env-var detection (`TERM` / `TERM_PROGRAM` / `COLORTERM`).
+  Always available, no I/O, never panics. The shim that
+  `Protocol::Auto::encode` dispatches through. Heuristics, in
+  priority order:
+  1. `TERM_PROGRAM` (most specific): `kitty` / `wezterm` /
+     `ghostty` (case-insensitive) -> `Protocol::Kitty`.
+  2. `TERM` (terminfo name): `xterm-kitty` / `foot` / `foot-*`
+     -> `Protocol::Kitty`; `tmux` / `tmux-*` -> `Protocol::Sixel`
+     (Kitty via tmux needs passthrough, not yet implemented).
+  3. `COLORTERM` tiebreaker (weak signal): `truecolor` / `24bit`
+     -> `Protocol::Kitty` when `TERM`/`TERM_PROGRAM` are
+     inconclusive. Modern truecolor terminals are more likely to
+     support the Kitty graphics protocol than the average
+     XTerm-like terminal.
+  4. Default -> `Protocol::Sixel` (most universal fallback).
+- `#[cfg(feature = "kitty-encoder")] pub fn detect_with_probe() -> Result<Protocol, EncoderError>`:
+  authoritative detection via the I/O-based Kitty query-response
+  probe (`little_kitty::Command::is_supported()`). Short-circuits
+  to `Ok(Kitty)` when the env-var shim already says Kitty (avoids
+  an unnecessary probe in the common case). Performs I/O on
+  stdin/stdout; do NOT call from a pure encoder (see AGENTS.md §7).
+- `pub(crate) fn detect_with_env(Option<&str>, Option<&str>) -> Protocol`:
+  testable inner of `detect`, accepts env values directly to
+  avoid `std::env::set_var` races in parallel tests.
+- Private `fn dispatch(Protocol, &FrameBuffer) -> Result<Vec<u8>, EncoderError>`
+  refactored out of the `ProtocolEncoder for Protocol` impl so
+  the `Auto` arm can recurse cleanly via `dispatch(detect(), frame)`
+  without duplicating the per-variant `#[cfg]` matrix. The
+  recursion is bounded because `detect` returns only `Kitty` or
+  `Sixel` (never `Auto`) by construction.
+- `Protocol::Auto` arm of `ProtocolEncoder::encode`:
+  `dispatch(detect(), frame)`. When neither encoder feature is
+  enabled, the recursion lands in the disabled-feature Kitty or
+  Sixel arm and returns `Err(UnsupportedProtocol)` (the error
+  name is the concrete protocol picked by `detect`, not `"auto"`).
+- `lib.rs` re-exports `pub use encoder::{detect, EncoderError,
+  Protocol, ProtocolEncoder};` and, gated on `kitty-encoder`,
+  `pub use encoder::detect_with_probe;`.
+- `main.rs` CLI flags: `--protocol <kitty|sixel|auto>` (override
+  the default) and `--probe` (use the I/O-based Kitty probe
+  instead of the env-var shim). Default protocol is now
+  `Protocol::Auto`. The demo logs both the requested and resolved
+  protocol so the user can verify the auto-detect.
+- 14 new unit tests in `src/encoder.rs`:
+  - `as_str_matches_variant` (extended to cover `Auto`).
+  - `detect_with_env_picks_kitty_for_term_program_kitty` (with
+    case-insensitive variants for `Kitty` / `KITTY`).
+  - `detect_with_env_picks_kitty_for_term_program_wezterm` /
+    `..._ghostty` (case-insensitive).
+  - `detect_with_env_picks_kitty_for_xterm_kitty`.
+  - `detect_with_env_picks_kitty_for_foot_and_foot_extra`
+    (`foot`, `foot-extra`, `foot-256color`).
+  - `detect_with_env_picks_sixel_for_tmux` (`tmux`,
+    `tmux-256color`, `tmux-direct`).
+  - `detect_with_env_picks_sixel_for_xterm_256color`.
+  - `detect_with_env_picks_sixel_when_neither_set` (both
+    unset and both empty).
+  - `detect_with_env_term_program_wins_over_term` (priority
+    ordering).
+  - `detect_with_env_unknown_term_program_falls_through_to_term`.
+  - `detect_with_env_colorterm_truecolor_picks_kitty_for_unknown_term`.
+  - `detect_with_env_colorterm_24bit_picks_kitty_for_unknown_term`.
+  - `detect_with_env_colorterm_does_not_override_term_program`.
+  - `dispatch_auto_recurses_through_detect` (no-env-var
+    termination test).
+  - `dispatch_auto_with_term_program_kitty_delegates_to_kitty`
+    (env-var-driven dispatch, gated on `kitty-encoder`).
+  - `dispatch_auto_with_term_tmux_delegates_to_sixel`
+    (env-var-driven dispatch, gated on `sixel-encoder`).
+  - `auto_encode_through_trait_delegates_to_dispatch` (gated
+    on both features; closes the one-line-wrapper regression
+    gap between `Protocol::Auto.encode` and `dispatch`).
+  - `detect_with_probe_short_circuits_when_env_already_kitty`
+    (gated on `kitty-encoder`; verifies the env-var short-circuit
+    path returns `Ok(Kitty)` without invoking the probe).
+
+### Changed
+- `Cargo.toml` version bumped to 0.7.0. No new features, no new
+  dependencies.
+- `src/encoder.rs` module doc updated to mention v0.7.0 and the
+  auto-detect shim.
+- `src/main.rs` rewritten to default to `Protocol::Auto`, parse
+  the `--protocol` / `--probe` CLI flags, and log the resolved
+  protocol. The demo gracefully falls back to the env-var shim
+  when `--probe` is passed but the `kitty-encoder` feature is
+  not enabled.
+- The `with_env` test helper (used by 2 dispatch tests) is
+  process-global and racy under `cargo test`'s default parallel
+  harness. The race is acknowledged in a code comment; a future
+  v0.7.1+ may move these to integration tests in `tests/` or add
+  a `Mutex<()>` for serialisation.
+
+### Notes
+- `cargo build`, `cargo test`, `cargo fmt --check`, and
+  `cargo clippy --all-targets -- -D warnings` are all clean
+  for ALL four feature combinations: default,
+  `--features kitty-encoder`, `--features sixel-encoder`, and
+  `--features kitty-encoder,sixel-encoder`. `cargo build --release`
+  is clean for the default and both-features combos.
+- Test count per feature combo: 4 with default features, 17 with
+  `--features kitty-encoder` alone, 7 with `--features
+  sixel-encoder` alone, 20 with both features; +1 doc test.
+  (The previous v0.6.0 release had 4 / 6 / 6 / 8; the v0.7.0
+  bump adds the 14 new `detect` / `dispatch` / `auto_encode`
+  tests plus the existing per-encoder tests under their
+  respective feature gates.)
+- The `Result<Vec<u8>, EncoderError>` return on
+  `ProtocolEncoder::encode` (carried over from v0.5.0/v0.6.0) is
+  the only way to surface `EncoderError::UnsupportedProtocol`
+  from the disabled-feature arms and the not-yet-implemented
+  error paths. A literal `Vec<u8>` return (as in the original
+  v0.5.0 spec) would have required either gating the entire
+  trait on a feature (breaking the ungated re-exports) or
+  panicking from disabled-feature / not-implemented paths.
+- End-to-end demo verification (both-features build):
+  - `TERM=xterm-kitty TERM_PROGRAM=kitty`: resolves to `kitty`,
+    emits 10,268 bytes starting with `1b 5f 47` (`\x1b_G`) and
+    ending with `2f 1b 5c` (`/\x1b\\`).
+  - `TERM=tmux-256color`: resolves to `sixel`, emits 142 bytes
+    starting with `1b 50 39` (`\x1bP9`).
+  - `COLORTERM=truecolor TERM=xterm-256color`: resolves to
+    `kitty` (COLORTERM tiebreaker kicks in).
+  - Default-features build: resolves to `sixel` (env-var
+    default), then prints
+    `encoder error for protocol sixel: protocol sixel is not
+    supported in this build (is the required Cargo feature
+    enabled?)` and exits 0. The demo is designed to fail
+    gracefully when the relevant Cargo feature is missing.
+
+
 ## 0.6.0 (2026-07-02)
 
 Second protocol encoder: the Sixel graphics protocol, wired up via

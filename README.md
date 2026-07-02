@@ -141,6 +141,25 @@ let id = stack.push(img);
 | `kitty-encoder`   |   off   | `little-kitty = "0.0.3"` | `Protocol::Kitty` produces real Kitty escape sequences |
 | `image-decoder`  |   off   | `image = "0.25"`  | `ImageLayer` (PNG + JPEG)      |
 
+### Auto-detect protocol
+
+`dashcompositor::Protocol::Auto` (re-exported as the
+[`Protocol`] enum variant) defers the choice to the
+pure env-var shim [`detect`] at encode time, which
+picks `Protocol::Kitty` or `Protocol::Sixel` based on
+`TERM` / `TERM_PROGRAM` / `COLORTERM`. The CLI demo
+defaults to `Protocol::Auto`; pass
+`--protocol <kitty|sixel|auto>` to override or
+`--probe` to use the I/O-based Kitty query-response
+probe ([`detect_with_probe`], requires the
+`kitty-encoder` feature). Enable at least one of the
+encoder features for `Protocol::Auto` to produce
+anything other than an `UnsupportedProtocol` error.
+
+[`detect`]: https://docs.rs/dashcompositor/latest/dashcompositor/encoder/fn.detect.html
+[`detect_with_probe`]: https://docs.rs/dashcompositor/latest/dashcompositor/encoder/fn.detect_with_probe.html
+[`Protocol`]: https://docs.rs/dashcompositor/latest/dashcompositor/enum.Protocol.html
+
 A custom `Compositor` can be plugged in via `LayerStack::render_with`;
 the default `CpuCompositor` is a zero-dependency reference
 implementation.
