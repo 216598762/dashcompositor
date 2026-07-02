@@ -1,6 +1,6 @@
 [package]
 name = "dashcompositor"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Layer-based graphics compositor for the terminal (Kitty graphics protocol / Sixel)"
 license = "MIT"
@@ -12,6 +12,9 @@ authors = ["216598762"]
 # Private early-stage scaffold. Remove this line (or set to `true`) before
 # publishing to crates.io once the library surface stabilises.
 publish = false
+
+[dependencies]
+terminal_size = "0.3"
 
 [lib]
 name = "dashcompositor"

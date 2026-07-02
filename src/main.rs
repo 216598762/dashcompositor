@@ -1,19 +1,25 @@
-//! `dashcompositor` CLI — first-subsystem demo.
+//! `dashcompositor` CLI -- terminal-fit layer-stack demo.
 //!
-//! Demonstrates that a backend (this binary) can build a
-//! [`dashcompositor::LayerStack`], add and remove layers, control
-//! their opacity / visibility / z-order override, and render the
-//! result into an RGBA [`dashcompositor::FrameBuffer`].
-//!
-//! No protocol encoder is implemented yet (`AGENTS.md` §3 keeps the
-//! `kittage` / `icy_sixel` candidate crates un-adopted), so the
-//! composited framebuffer is not emitted to stdout; instead it is
-//! summarised as channel sums so a human can verify the compositing
-//! path works end-to-end.
+//! Demonstrates that a backend (this binary) can:
+//! 1. Detect the host terminal's cell-grid size via
+//!    [`dashcompositor::TerminalSize`].
+//! 2. Build a [`dashcompositor::LayerStack`], add and remove layers,
+//!    and control their opacity / visibility / z-order override.
+//! 3. Render the stack into a framebuffer auto-sized to the terminal
+//!    via [`dashcompositor::LayerStack::render_to_current_terminal`].
+//! 4. Report the terminal size back through the API.
 
-use dashcompositor::{FrameBuffer, LayerStack, SolidColor};
+use dashcompositor::{LayerStack, SolidColor, TerminalSize};
 
 fn main() {
+    let size = TerminalSize::current();
+    eprintln!(
+        "dashcompositor v0.3.0 -- terminal-fit compositor: \
+host terminal = {cols} cols x {rows} rows",
+        cols = size.cols,
+        rows = size.rows,
+    );
+
     let mut stack = LayerStack::new();
 
     // 1. Add a full-frame red background at z=0.
@@ -29,20 +35,20 @@ fn main() {
         entry.set_opacity(0.5);
     }
 
-    // 3. Render the initial state.
-    let mut fb = FrameBuffer::new(4, 2);
-    stack.render(&mut fb);
-    let (r, g, b, a) = channel_sums(fb.pixels());
+    // 3. Auto-fit the framebuffer to the host terminal and render.
+    let (fb, reported) = stack.render_to_current_terminal();
+    assert_eq!(reported.cols as u32, fb.width());
+    assert_eq!(reported.rows as u32, fb.height());
     eprintln!(
-        "dashcompositor demo v0.2.0 — first subsystem (layer stack): \
-stack len={}, framebuffer {}x{}, channel sums R={r} G={g} B={b} A={a}",
-        stack.len(),
+        "rendered {}x{} framebuffer ({} pixels, {} layer(s))",
         fb.width(),
         fb.height(),
+        fb.pixels().len(),
+        stack.len(),
     );
 
     // 4. Control at will: hide foreground, remove background, re-add
-    //    a new accent layer with a z-override, render again.
+    //    a new accent layer with a z-override, re-render.
     if let Some(entry) = stack.get_mut(fg) {
         entry.set_visible(false);
     }
@@ -51,26 +57,12 @@ stack len={}, framebuffer {}x{}, channel sums R={r} G={g} B={b} A={a}",
     if let Some(entry) = stack.get_mut(accent) {
         entry.set_z_override(100);
     }
-
-    let mut fb2 = FrameBuffer::new(4, 2);
-    stack.render(&mut fb2);
-    let (r2, g2, b2, a2) = channel_sums(fb2.pixels());
+    let (fb2, _) = stack.render_to_current_terminal();
     eprintln!(
-        "after control: stack len={}, channel sums R={r2} G={g2} B={b2} A={a2}",
+        "after control: rendered {}x{} framebuffer ({} pixels, {} layer(s))",
+        fb2.width(),
+        fb2.height(),
+        fb2.pixels().len(),
         stack.len(),
     );
-}
-
-/// Returns the per-channel sum of an RGBA pixel slice.
-fn channel_sums(pixels: &[[u8; 4]]) -> (u32, u32, u32, u32) {
-    pixels
-        .iter()
-        .fold((0u32, 0u32, 0u32, 0u32), |(r, g, b, a), px| {
-            (
-                r + u32::from(px[0]),
-                g + u32::from(px[1]),
-                b + u32::from(px[2]),
-                a + u32::from(px[3]),
-            )
-        })
 }

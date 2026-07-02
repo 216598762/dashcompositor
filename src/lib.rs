@@ -7,11 +7,13 @@ pub mod compositor;
 pub mod encoder;
 pub mod framebuffer;
 pub mod layer;
+pub mod terminal;
 
 pub use compositor::{Compositor, CpuCompositor, LayerStack};
 pub use encoder::Protocol;
 pub use framebuffer::{blend_over, FrameBuffer};
 pub use layer::{Layer, LayerEntry, LayerId, SolidColor};
+pub use terminal::TerminalSize;
 
 #[cfg(test)]
 mod tests {

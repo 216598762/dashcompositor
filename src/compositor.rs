@@ -6,6 +6,7 @@
 
 use crate::framebuffer::FrameBuffer;
 use crate::layer::{Layer, LayerEntry, LayerId};
+use crate::terminal::TerminalSize;
 
 /// A compositor that resolves a [`LayerStack`] of layers into a
 /// single [`FrameBuffer`].
@@ -181,6 +182,26 @@ impl LayerStack {
     pub fn render_with<C: Compositor>(&self, compositor: &C, target: &mut FrameBuffer) {
         compositor.compose(self, target);
     }
+
+    /// Renders the stack into a fresh [`FrameBuffer`] sized to the
+    /// given terminal and returns it. This is the "fits the terminal"
+    /// entry point callers should reach for when projecting to a TTY.
+    pub fn render_to_terminal(&self, size: TerminalSize) -> FrameBuffer {
+        let (w, h) = size.as_framebuffer_size();
+        let mut fb = FrameBuffer::new(w, h);
+        self.render(&mut fb);
+        fb
+    }
+
+    /// Convenience: auto-detect the current terminal size, then
+    /// render into a framebuffer of that size. Returns the
+    /// (framebuffer, terminal size) tuple so the backend can
+    /// report the size back through the API.
+    pub fn render_to_current_terminal(&self) -> (FrameBuffer, TerminalSize) {
+        let size = TerminalSize::current();
+        let fb = self.render_to_terminal(size);
+        (fb, size)
+    }
 }
 
 impl Default for LayerStack {
@@ -305,5 +326,24 @@ mod tests {
         let mut fb = FrameBuffer::new(1, 1);
         let comp = CountingComp(0);
         s.render_with(&comp, &mut fb);
+    }
+
+    #[test]
+    fn render_to_terminal_returns_buffer_of_given_size() {
+        let s = LayerStack::new();
+        s.push(SolidColor::new(0, 0, 0, 255));
+        let size = TerminalSize { rows: 5, cols: 10 };
+        let fb = s.render_to_terminal(size);
+        assert_eq!(fb.width(), 10);
+        assert_eq!(fb.height(), 5);
+        assert_eq!(fb.pixels().len(), 50);
+    }
+
+    #[test]
+    fn render_to_current_terminal_returns_size() {
+        let s = LayerStack::new();
+        let (fb, reported) = s.render_to_current_terminal();
+        assert_eq!(fb.width() as u16, reported.cols);
+        assert_eq!(fb.height() as u16, reported.rows);
     }
 }

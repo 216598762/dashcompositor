@@ -4,6 +4,39 @@ All notable changes to `dashcompositor` are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.3.0 (2026-07-02)
+
+Terminal-aware compositor: the framebuffer is auto-sized to the
+host terminal, and the detected size is reported back through the
+API.
+
+### Added
+- `terminal_size = "0.3"` as the first runtime dependency (AGENTS.md
+  section 3 evaluation: tiny, MIT-licensed, zero transitive deps,
+  used by cargo, ripgrep, fd, and many others).
+- New `src/terminal.rs` module with `TerminalSize { rows, cols }` and
+  the entry points:
+  - `TerminalSize::detect()` -- queries the host via
+    `ioctl`/console mode; returns `Option<Self>`.
+  - `TerminalSize::current()` -- detects or falls back to 80x24.
+    Never panics.
+  - `TerminalSize::fallback()` -- the static 80x24 default.
+  - `TerminalSize::as_framebuffer_size()` -- converts to a
+    `(u32, u32)` tuple for `FrameBuffer::new`.
+- `LayerStack::render_to_terminal(size)` renders into a
+  `FrameBuffer` sized to the given terminal.
+- `LayerStack::render_to_current_terminal()` detects the terminal
+  size and renders, returning the `(FrameBuffer, TerminalSize)`
+  tuple so the backend can report the size back through the API.
+- `main.rs` rewritten to detect the terminal size on startup,
+  print it, use `render_to_current_terminal` to fit the framebuffer
+  to the host, and verify the rendered size matches the reported
+  size.
+- Tests for `TerminalSize` (fallback, conversion, equality,
+  panic-free `current`) and for the new `LayerStack` methods.
+
+the project adheres to [Semantic Versioning](https://semver.org/).
+
 ## 0.2.0 (2026-07-02)
 
 First concrete subsystem: a layer stack that the backend (any binary
