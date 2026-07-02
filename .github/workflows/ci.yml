@@ -5,6 +5,8 @@
 #   - fmt job: `cargo fmt --all -- --check` (workspace-wide, no
 #     features; cheap to run and gates the rest of the pipeline on
 #     the rustfmt contract).
+#   - msrv job: `cargo check` on Rust 1.73 (the pinned MSRV).
+#     Validates the crate compiles on the minimum supported version.
 #   - validate job: 4-way feature matrix (default, kitty-encoder,
 #     sixel-encoder, both) running `cargo build`, `cargo build
 #     --release`, `cargo test`, and `cargo clippy --all-targets
@@ -12,7 +14,7 @@
 #     combo's failure does not mask the others.
 #
 # Toolchain: latest stable Rust via `dtolnay/rust-toolchain@stable`
-# (no MSRV is pinned in `Cargo.toml`, so stable is correct). The
+# for fmt/validate; the msrv job pins the exact MSRV version. The
 # fmt job installs `rustfmt`; the validate job installs `clippy`.
 #
 # Caching: `Swatinem/rust-cache@v2` keys the cache on `Cargo.lock`
@@ -57,6 +59,24 @@ jobs:
 
       - name: cargo fmt --all -- --check
         run: cargo fmt --all -- --check
+
+  msrv:
+    name: msrv (Rust 1.73)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.73
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.73
+
+      - name: cargo check (default features)
+        run: cargo check --verbose
+
+      - name: cargo check (all features)
+        run: cargo check --all-features --verbose
 
   validate:
     name: validate (${{ matrix.features || 'default' }})

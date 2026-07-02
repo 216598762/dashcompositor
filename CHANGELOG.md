@@ -1,3 +1,42 @@
+## 0.11.0 (2026-07-02)
+
+Pre-1.0 infrastructure: MSRV policy, benchmarks, CONTRIBUTING.md.
+No API changes; all additions are developer-facing.
+
+### Added
+- `rust-version = "1.73"` in `Cargo.toml`: the MSRV is now
+  pinned and checked in CI. The minimum is driven by `div_ceil`
+  (stabilised in 1.73) used in the chunked Kitty encoder and
+  the streaming Sixel band loop.
+- `benches/compositor.rs`: 19 Criterion benchmarks covering the
+  compositor core (framebuffer allocation/clear/blend/get_pixel,
+  solid colour / rect / text layer rendering, multi-layer stacks,
+  and feature-gated Kitty/Sixel encoder paths). Run with
+  `cargo bench` (or `cargo bench --all-features` for the full
+  suite).
+- `CONTRIBUTING.md`: project contributing guide covering the
+  build/test workflow, feature matrix, commit message format,
+  code style, PR process, MSRV policy, and dependency addition
+  guidelines.
+- CI job `msrv`: verifies `cargo check` succeeds on Rust 1.73
+  (the pinned MSRV). Runs in parallel with the existing `fmt`
+  and `validate` jobs.
+- `criterion = "0.5"` dev-dependency for the benchmark harness.
+
+### Changed
+- `Cargo.toml` version bumped from 0.10.0 to 0.11.0.
+- `README.md` "Contributing" section updated to point to
+  `CONTRIBUTING.md`; MSRV badge added.
+- `src/main.rs` version banner updated to v0.11.0.
+
+### Notes
+- No API changes; no new runtime dependencies.
+- All 7 feature combos clean: fmt, build, test, clippy -D
+  warnings, MSRV check.
+- This is the third-last pre-1.0 minor. The next release
+  (v0.12.0) will address remaining 1.0 checklist items;
+  the release after that is v1.0.0.
+
 ## 0.10.0 (2026-07-02)
 
 API stabilization release: the public API surface is frozen for

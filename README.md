@@ -55,12 +55,17 @@ sequences.
 
 ## Contributing
 
-Read [`AGENTS.md`](./AGENTS.md) first. Key rules:
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full contributor
+guide. AI agents should read [`AGENTS.md`](./AGENTS.md) first.
+
+Key rules:
 
 - Use existing Rust libraries where they exist; start searching from
   [awesome-rust](https://github.com/rust-unofficial/awesome-rust).
 - Commit and push frequently with detailed, multi-line commit messages.
 - Never open issues on this repository.
+
+**Minimum Supported Rust Version**: 1.73.
 
 ## License
 
