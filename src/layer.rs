@@ -346,22 +346,49 @@ impl TextLayer {
     /// the measured advance widths of each glyph (using the
     /// lazy-loaded font). Without the feature, returns the number
     /// of Unicode scalar values (the placeholder width).
+    /// Total text advance width in pixels.
+    ///
+    /// When the `font-rasterizer` feature is enabled, this returns
+    /// the maximum line width (using measured glyph advance widths).
+    /// Without the feature, returns the maximum line length in
+    /// Unicode scalar values. Empty text returns 0.
     pub fn text_width(&self) -> u32 {
         #[cfg(feature = "font-rasterizer")]
         {
             let font = self.ensure_font();
             self.text
-                .chars()
-                .map(|ch| {
-                    let glyph_idx = font.lookup_glyph_index(ch);
-                    let (metrics, _) = font.rasterize_indexed(glyph_idx, self.font_size);
-                    metrics.advance_width as u32
+                .lines()
+                .map(|line| {
+                    line.chars()
+                        .map(|ch| {
+                            let glyph_idx = font.lookup_glyph_index(ch);
+                            let (metrics, _) =
+                                font.rasterize_indexed(glyph_idx, self.font_size);
+                            metrics.advance_width as u32
+                        })
+                        .sum()
                 })
-                .sum()
+                .max()
+                .unwrap_or(0)
         }
         #[cfg(not(feature = "font-rasterizer"))]
         {
-            self.text.chars().count() as u32
+            self.text
+                .lines()
+                .map(|line| line.chars().count() as u32)
+                .max()
+                .unwrap_or(0)
+        }
+    }
+
+    /// Number of visual lines in the text. A line is delimited by
+    /// `\n`. Always at least 1 (empty text is one blank line).
+    #[cfg(feature = "font-rasterizer")]
+    pub fn num_lines(&self) -> u32 {
+        if self.text.is_empty() {
+            1
+        } else {
+            self.text.matches('\n').count() as u32 + 1
         }
     }
 
@@ -407,12 +434,16 @@ impl Layer for TextLayer {
         #[cfg(feature = "font-rasterizer")]
         {
             let w = self.text_width();
-            let h = self.font_size as u32;
+            let nl = self.num_lines();
+            let h = (self.font_size as u32).max(1) * nl;
             Some(Rect::new(self.x, self.y, w.max(1), h.max(1)))
         }
         #[cfg(not(feature = "font-rasterizer"))]
         {
-            Some(Rect::new(self.x, self.y, self.text_width(), 1))
+            // Must stay in sync with render_placeholder, which
+            // uses .lines().count() — strip trailing empty lines.
+            let nl = self.text.lines().count().max(1) as u32;
+            Some(Rect::new(self.x, self.y, self.text_width(), nl))
         }
     }
 
@@ -437,21 +468,22 @@ impl TextLayer {
         let ox = self.x.saturating_add(offset.0);
         let oy = self.y.saturating_add(offset.1);
         let effective = (f32::from(self.color[3]) / 255.0 * opacity).clamp(0.0, 1.0);
+        let line_height = self.font_size as i32;
 
-        // Approximate the baseline at ~85% of font size below
-        // the top of the line, which is a reasonable heuristic
-        // for most Latin monospace fonts.
-        let baseline_y = oy.saturating_add((self.font_size * 0.85) as u32) as i32;
+        // Approximate the first baseline at ~85% of font size
+        // below the top of the first line.
+        let first_baseline_y = oy as i32 + (self.font_size * 0.85) as i32;
         let mut cursor_x = ox as i32;
+        let mut cursor_y = first_baseline_y;
 
         for ch in self.text.chars() {
             if ch == '\n' {
                 cursor_x = ox as i32;
+                cursor_y += line_height;
                 continue;
             }
             if ch == ' ' {
-                // Space: use the font's actual space advance width,
-                // even though the glyph bitmap is empty.
+                // Space: use the font's actual space advance width.
                 let glyph_idx = font.lookup_glyph_index(ch);
                 let (metrics, _) = font.rasterize_indexed(glyph_idx, self.font_size);
                 cursor_x += metrics.advance_width as i32;
@@ -461,12 +493,10 @@ impl TextLayer {
             let glyph_idx = font.lookup_glyph_index(ch);
             let (metrics, alpha) = font.rasterize_indexed(glyph_idx, self.font_size);
 
-            // Position the glyph bitmap. fontdue's ymin is the
-            // y-offset from the baseline to the top of the bitmap
-            // in screen coordinates (positive = below baseline,
-            // negative = above).
+            // Position the glyph bitmap relative to the current
+            // line's baseline.
             let glyph_x = cursor_x + metrics.xmin;
-            let glyph_y = baseline_y + metrics.ymin;
+            let glyph_y = cursor_y + metrics.ymin;
 
             for gy in 0..metrics.height {
                 for gx in 0..metrics.width {
@@ -500,12 +530,15 @@ impl TextLayer {
         let ox = self.x.saturating_add(offset.0);
         let oy = self.y.saturating_add(offset.1);
         let effective = (f32::from(self.color[3]) / 255.0 * opacity).clamp(0.0, 1.0);
-        let w = self.text_width();
-        for sx in 0..w {
-            let tx = ox + sx;
-            let ty = oy;
-            if let Some(px) = target.get_pixel_mut(tx, ty) {
-                crate::framebuffer::blend_over(px, &self.color, effective);
+
+        for (line_idx, line) in self.text.lines().enumerate() {
+            let w = line.chars().count() as u32;
+            let ty = oy + line_idx as u32;
+            for sx in 0..w {
+                let tx = ox + sx;
+                if let Some(px) = target.get_pixel_mut(tx, ty) {
+                    crate::framebuffer::blend_over(px, &self.color, effective);
+                }
             }
         }
     }
@@ -993,6 +1026,80 @@ mod tests {
             large.text_width() >= small.text_width(),
             "larger font size should produce >= advance width"
         );
+    }
+
+    // -- Multi-line text tests (both feature configs) -------------
+
+    #[cfg(feature = "font-rasterizer")]
+    #[test]
+    fn text_layer_multi_line_text_width_is_max_line() {
+        let t = TextLayer::new(0, 0, "short\na longer line\ntiny", [255; 4]);
+        // text_width should be the longest line, not the sum.
+        // "a longer line" > "short" and "tiny", so that line's
+        // advance width is text_width.
+        assert!(t.text_width() > 0);
+        // The width of "a longer line" alone.
+        let single = TextLayer::new(0, 0, "a longer line", [255; 4]).with_font_size(14.0);
+        assert_eq!(t.text_width(), single.text_width());
+    }
+
+    #[cfg(feature = "font-rasterizer")]
+    #[test]
+    fn text_layer_multi_line_bounds_height_includes_all_lines() {
+        let t = TextLayer::new(0, 0, "line1\nline2\nline3", [255; 4]).with_font_size(14.0);
+        let b = t.bounds().unwrap();
+        // 3 lines, each 14px tall = 42px.
+        assert_eq!(b.height, 42);
+        // Width is the widest line.
+        let single = TextLayer::new(0, 0, "line1", [255; 4]).with_font_size(14.0);
+        assert_eq!(b.width, single.text_width().max(1));
+    }
+
+    #[cfg(feature = "font-rasterizer")]
+    #[test]
+    fn text_layer_multi_line_render_renders_all_lines() {
+        let t = TextLayer::new(0, 0, "A\nB\nC", [255, 255, 255, 255]).with_font_size(14.0);
+        let mut fb = FrameBuffer::new(20, 50);
+        t.render(&mut fb, (0, 0), 1.0);
+        // All three lines should produce non-transparent pixels
+        // scattered across the full height.
+        let has_pixels = fb.pixels().iter().any(|p| p[3] > 0);
+        assert!(has_pixels, "multi-line render should produce glyph pixels");
+        // Pixels in the bottom third indicate the third line rendered.
+        let h = fb.height();
+        let bottom_third_pixels = fb.pixels()[(((2 * h / 3) as usize) * fb.width() as usize)..]
+            .iter()
+            .any(|p| p[3] > 0);
+        assert!(
+            bottom_third_pixels,
+            "third line (bottom third of framebuffer) should have rendered pixels"
+        );
+    }
+
+    #[cfg(feature = "font-rasterizer")]
+    #[test]
+    fn text_layer_multi_line_num_lines() {
+        let t = TextLayer::new(0, 0, "a\nb\nc", [255; 4]);
+        assert_eq!(t.num_lines(), 3);
+        let single = TextLayer::new(0, 0, "hello", [255; 4]);
+        assert_eq!(single.num_lines(), 1);
+        let empty = TextLayer::new(0, 0, "", [255; 4]);
+        assert_eq!(empty.num_lines(), 1);
+        let trailing = TextLayer::new(0, 0, "a\nb\n", [255; 4]);
+        assert_eq!(trailing.num_lines(), 3);
+    }
+
+    // -- Placeholder multi-line tests (font-rasterizer OFF) -------
+
+    #[cfg(not(feature = "font-rasterizer"))]
+    #[test]
+    fn text_layer_multi_line_placeholder_bounds() {
+        let t = TextLayer::new(0, 0, "abc\nde\nf", [255; 4]);
+        let b = t.bounds().unwrap();
+        // Width should be the widest line ("abc" = 3).
+        assert_eq!(b.width, 3);
+        // Height should be 3 lines.
+        assert_eq!(b.height, 3);
     }
 
     #[test]
