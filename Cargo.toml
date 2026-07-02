@@ -24,8 +24,12 @@ publish = false
 # the `Protocol::Sixel` arm produces real Sixel DCS escape
 # sequences; without it, the Sixel arm returns
 # `Err(EncoderError::UnsupportedProtocol("sixel"))`.
-# Default features stay empty so a default build is dep-light.
-default = []
+# Default features stay minimal: `font-rasterizer` is on by default
+# so TextLayer has real glyph rendering out of the box via the
+# bundled Fira Mono font. Encoder features (`kitty-encoder`,
+# `sixel-encoder`) and `image-decoder` remain opt-in so the
+# default build stays dependency-light.
+default = ["font-rasterizer"]
 image-decoder = ["dep:image"]
 kitty-encoder = ["dep:little-kitty"]
 sixel-encoder = ["dep:icy_sixel"]
