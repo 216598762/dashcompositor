@@ -17,6 +17,12 @@ pub use compositor::{Compositor, CpuCompositor, LayerStack};
 pub use encoder::detect_with_probe;
 #[cfg(feature = "kitty-encoder")]
 pub use encoder::wrap_for_tmux;
+#[cfg(feature = "kitty-encoder")]
+pub use encoder::wrap_for_tmux_to_writer;
+#[cfg(feature = "kitty-encoder")]
+pub use encoder::PassthroughWriter;
+#[cfg(feature = "kitty-encoder")]
+pub use encoder::encode_passthrough_to_writer;
 pub use encoder::{detect, EncoderError, Protocol, ProtocolEncoder};
 pub use framebuffer::{blend_over, FrameBuffer};
 pub use geometry::Rect;

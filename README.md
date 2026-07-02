@@ -162,6 +162,46 @@ anything other than an `UnsupportedProtocol` error.
 
 
 
+
+### End-to-end O(1) streaming wrap (v0.8.3)
+
+The v0.8.0 `wrap_for_tmux` materialised the full
+wrapped output in a `Vec<u8>`, which (combined with
+`dispatch(Protocol::Kitty, frame)`) made the entire
+encode + wrap + emit pipeline O(N) in framebuffer size.
+v0.8.3 adds three new public APIs that make the entire
+pipeline O(1) per write call (~4KB scratch):
+
+```rust,ignore
+use dashcompositor::encoder::kitty;
+use dashcompositor::framebuffer::FrameBuffer;
+use std::io::BufWriter;
+
+let fb = FrameBuffer::new(1920, 1080);
+let stdout = std::io::stdout();
+// End-to-end O(1): encode + (optional) wrap + write in
+// one pass, with no intermediate `Vec<u8>` allocation.
+let mut writer = BufWriter::new(stdout.lock());
+kitty::encode_passthrough_to_writer(&fb, &mut writer)?;
+```
+
+The three new APIs are composable:
+
+- `wrap_for_tmux_to_writer<W: Write>(inner: &[u8], &mut W)`
+  -- streaming wrap of a raw byte slice.
+- `PassthroughWriter<W: Write>` -- a `Write` adapter
+  that wraps the inner output in a tmux passthrough
+  DCS (prefix on first write, ESC doubling in body,
+  suffix on `finish()`).
+- `encode_passthrough_to_writer<W: Write>(frame, &mut W)`
+  -- the end-to-end O(1) entry point.
+
+The existing `wrap_for_tmux(Vec<u8>) -> Vec<u8>` entry
+point is preserved for backwards compat and is now a
+thin wrapper that delegates to `wrap_for_tmux_to_writer`
+writing to a fresh `Vec<u8>`. Wire format is
+byte-for-byte equivalent to v0.8.0/v0.8.2 for the same
+input.
 ### Streaming encode (v0.8.2)
 
 The v0.8.1 chunked encoder still materialised the

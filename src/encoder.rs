@@ -272,9 +272,13 @@ pub trait ProtocolEncoder {
 /// be applied to the Kitty encoder's output. The check is
 /// pure (env vars only); the caller decides whether to
 /// wrap. Gated on `kitty-encoder` because the wrapping is
-/// only relevant for Kitty output.
+/// only relevant for Kitty output. `pub(crate)` so the
+/// v0.8.3 end-to-end `encode_passthrough_to_writer` in
+/// the `kitty` submodule can call it (the default
+/// `fn`-private visibility is restricted to the current
+/// module only, not its descendants).
 #[cfg(feature = "kitty-encoder")]
-fn tmux_passthrough_enabled() -> bool {
+pub(crate) fn tmux_passthrough_enabled() -> bool {
     // `DASHPASSTHROUGH` is the v0.8.0 opt-in: any non-empty
     // value enables passthrough. Typical usage is
     // `DASHPASSTHROUGH=1`. The env var is also set by
@@ -362,6 +366,7 @@ impl ProtocolEncoder for Protocol {
 /// streaming output (no full-framebuffer Vec).
 #[cfg(feature = "kitty-encoder")]
 mod kitty {
+    use super::tmux_passthrough_enabled;
     use super::EncoderError;
     use crate::framebuffer::FrameBuffer;
     use little_kitty::command::ControlValue;
@@ -569,6 +574,43 @@ mod kitty {
         build_apc_command(&controls, &rgba)
     }
 
+    /// Wraps the raw Kitty APC bytes in `inner` in a tmux
+    /// passthrough DCS (`\x1bPtmux;...\x1b\\`) and writes
+    /// the result to `out`. **v0.8.3 streaming version** of
+    /// [`wrap_for_tmux`]: takes a byte slice (the raw
+    /// Kitty APC bytes) and a `&mut impl Write` sink.
+    /// Memory bounded: O(1) -- no intermediate `Vec`
+    /// allocation; the user's writer buffers as needed.
+    ///
+    /// Inner `\x1b` bytes are DOUBLED so tmux 3.2+ passes
+    /// them through as a single literal `\x1b` to the outer
+    /// terminal. The Kitty payload only contains `\x1b` at
+    /// the introducer (`\x1b_G`) and terminator (`\x1b\\`),
+    /// so the doubling only affects those two locations.
+    /// tmux 3.2+ (released 2021) is the floor; tmux < 3.2
+    /// has no escape mechanism and would treat the inner
+    /// `\x1b\\` as the outer passthrough terminator
+    /// (corrupting the sequence).
+    pub fn wrap_for_tmux_to_writer<W: Write>(
+        inner: &[u8],
+        out: &mut W,
+    ) -> std::io::Result<()> {
+        // The DCS prefix is `ESC P tmux ;` (7 bytes) --
+        // written once, regardless of the inner size.
+        out.write_all(b"\x1bPtmux;")?;
+        // Walk the inner bytes; double every ESC.
+        for &b in inner {
+            if b == 0x1b {
+                out.write_all(&[0x1b, 0x1b])?;
+            } else {
+                out.write_all(&[b])?;
+            }
+        }
+        // The DCS terminator is `ESC \\` (2 bytes).
+        out.write_all(b"\x1b\\")?;
+        Ok(())
+    }
+
     /// Wraps a complete Kitty APC (`\x1b_G ... \x1b\\`) in a
     /// tmux passthrough DCS (`\x1bPtmux;...\x1b\\`) so the
     /// bytes survive the tmux→outer-terminal hop. Required
@@ -587,32 +629,191 @@ mod kitty {
     /// has no escape mechanism and would treat the inner
     /// `\x1b\\` as the outer passthrough terminator
     /// (corrupting the sequence).
+    ///
+    /// Thin convenience wrapper around
+    /// [`wrap_for_tmux_to_writer`]: allocates a fresh
+    /// `Vec<u8>` and delegates. The v0.8.0 entry point;
+    /// kept for backwards compat with callers that need a
+    /// `Vec<u8>` of the wrapped bytes. Callers that want
+    /// true zero-copy output to a file, socket, or
+    /// terminal handle should use [`wrap_for_tmux_to_writer`]
+    /// directly (memory bounded) or the end-to-end
+    /// [`encode_passthrough_to_writer`] (also memory
+    /// bounded, and combines the encode + wrap into a
+    /// single pass).
     pub fn wrap_for_tmux(inner: Vec<u8>) -> Vec<u8> {
-        // Worst case: every byte is 0x1b -> doubled, plus the
-        // 7-byte prefix and 2-byte suffix.
+        // Worst case: every byte is 0x1b -> doubled, plus
+        // the 7-byte prefix and 2-byte suffix.
         let mut out: Vec<u8> = Vec::with_capacity(inner.len() * 2 + 9);
-        out.extend_from_slice(b"\x1bPtmux;");
-        for &b in &inner {
-            if b == 0x1b {
-                out.push(0x1b);
-                out.push(0x1b);
-            } else {
-                out.push(b);
+        // Writing to a `Vec<u8>` never fails (the only
+        // `io::Error` a `Vec<u8>` can return is
+        // `io::ErrorKind::WriteZero` from a full disk,
+        // which doesn't apply to in-memory writes).
+        wrap_for_tmux_to_writer(&inner, &mut out)
+            .expect("writing to Vec<u8> cannot fail");
+        out
+    }
+
+    /// A `Write` adapter that wraps the inner output in a
+    /// tmux passthrough DCS (`\x1bPtmux;...\x1b\\`).
+    /// On the first byte written to the adapter, writes
+    /// the DCS prefix to the inner writer. Subsequent byte
+    /// writes are forwarded to the inner writer with every
+    /// `ESC` (0x1b) byte DOUBLED (so tmux 3.2+ treats it
+    /// as a literal `ESC` in the inner payload). The DCS
+    /// terminator is written by [`PassthroughWriter::finish`]
+    /// -- the caller MUST call `finish()` to produce a
+    /// complete wrapped DCS.
+    ///
+    /// `PassthroughWriter` is the v0.8.3 building block
+    /// for end-to-end O(1) streaming: combined with
+    /// [`encode_to_writer`] via
+    /// [`encode_passthrough_to_writer`], it lets the
+    /// entire encode + wrap + emit pipeline run in O(1)
+    /// memory (no intermediate `Vec` allocation). Used
+    /// directly by advanced callers that need to wrap an
+    /// arbitrary `&[u8]` body in a tmux passthrough DCS
+    /// without materialising the wrapped output in a `Vec`.
+    ///
+    /// The first byte written after construction triggers
+    /// the prefix; even an empty body gets a prefix +
+    /// suffix pair (this matches the v0.8.0
+    /// `wrap_for_tmux` behaviour for empty input:
+    /// `\x1bPtmux;\x1b\\`). `finish` is the only place the
+    /// suffix is written; `Drop` does NOT auto-finish (a
+    /// `Write::write` may fail with `io::Error`, which
+    /// `Drop` cannot propagate).
+    pub struct PassthroughWriter<W: Write> {
+        inner: W,
+        prefix_written: bool,
+    }
+
+    impl<W: Write> PassthroughWriter<W> {
+        /// Creates a new `PassthroughWriter` wrapping
+        /// `inner`. The DCS prefix is NOT written until the
+        /// first call to `write` (or `finish`, for an
+        /// empty body). This matches the v0.8.0
+        /// `wrap_for_tmux` behaviour: an empty input
+        /// produces `\x1bPtmux;\x1b\\`, with the prefix
+        /// written before the (zero-byte) body.
+        pub fn new(inner: W) -> Self {
+            Self {
+                inner,
+                prefix_written: false,
             }
         }
-        out.push(0x1b);
-        out.push(b'\\');
-        out
+
+        /// Writes the DCS terminator (`\x1b\\`) and
+        /// returns the inner writer. Consumes `self` so
+        /// the caller can't write more body bytes after
+        /// the terminator. If no body bytes were ever
+        /// written, also writes the prefix (an empty body
+        /// still produces a valid wrapped DCS).
+        pub fn finish(mut self) -> std::io::Result<W> {
+            if !self.prefix_written {
+                self.inner.write_all(b"\x1bPtmux;")?;
+            }
+            self.inner.write_all(b"\x1b\\")?;
+            Ok(self.inner)
+        }
+    }
+
+    impl<W: Write> std::io::Write for PassthroughWriter<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.prefix_written {
+                self.inner.write_all(b"\x1bPtmux;")?;
+                self.prefix_written = true;
+            }
+            // Forward each byte to the inner writer,
+            // doubling every ESC. We always write the
+            // full `buf` (the doubling doesn't change the
+            // byte count for the caller's perspective; it
+            // just emits 2 bytes for every 1 ESC byte in
+            // `buf`).
+            for &b in buf {
+                if b == 0x1b {
+                    self.inner.write_all(&[0x1b, 0x1b])?;
+                } else {
+                    self.inner.write_all(&[b])?;
+                }
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    /// End-to-end streaming entry point: encodes `frame`
+    /// via [`encode_to_writer`] and (if the tmux
+    /// passthrough opt-in is set) wraps the output in a
+    /// tmux passthrough DCS, all in a single pass with
+    /// O(1) memory.
+    ///
+    /// When `tmux_passthrough_enabled()` is `false` (the
+    /// default: the user has NOT set `DASHPASSTHROUGH=1`
+    /// and the `TMUX` env var is not set), this function
+    /// is equivalent to [`encode_to_writer`] -- no
+    /// wrapping is applied. When `true`, the encoded APC
+    /// bytes are passed through a [`PassthroughWriter`]
+    /// adapter that writes the DCS prefix once, doubles
+    /// every `ESC` byte in the body, and writes the DCS
+    /// terminator once at the end. The user's `&mut W`
+    /// sink receives the wrapped bytes directly, with no
+    /// intermediate `Vec` allocation.
+    ///
+    /// Compared to `dispatch(Protocol::Kitty, frame)`,
+    /// which materialises the full encode output (and
+    /// optionally the full wrapped output) in a `Vec`:
+    ///   - `dispatch` allocates O(N) where N is the
+    ///     framebuffer size (2MP frame = 8MB Vec for the
+    ///     encode, plus ~11MB Vec for the wrap).
+    ///   - `encode_passthrough_to_writer` allocates O(1)
+    ///     per write call (~4KB scratch), regardless of
+    ///     framebuffer size.
+    ///
+    /// The `DASHPASSTHROUGH` opt-in is checked here (not
+    /// in `detect`) for the same reason it is in
+    /// `dispatch`: a user with a known-good tmux + Kitty
+    /// setup who wants to force the wrap regardless of
+    /// `TERM` should be able to.
+    pub fn encode_passthrough_to_writer<W: Write>(
+        frame: &FrameBuffer,
+        out: &mut W,
+    ) -> Result<(), EncoderError> {
+        if !tmux_passthrough_enabled() {
+            return encode_to_writer(frame, out);
+        }
+        // Wrap the user's writer in a `PassthroughWriter`.
+        // The `&mut *out` reborrows `out` for the duration
+        // of the encode call; `finish()` then returns the
+        // borrow and we drop it.
+        let mut passthrough = PassthroughWriter::new(&mut *out);
+        encode_to_writer(frame, &mut passthrough)?;
+        let _inner = passthrough.finish()?;
+        Ok(())
     }
 }
 
-// Re-export `wrap_for_tmux` at the `encoder` module level so
-// downstream users (and the `dashcompositor` crate root) can
-// call it without reaching into the private `kitty` submodule.
-// Gated on `kitty-encoder` because the helper is only useful
-// for Kitty output.
+// Re-export the v0.8.0/v0.8.3 wrap_for_tmux family at the
+// `encoder` module level so downstream users (and the
+// `dashcompositor` crate root) can call them without
+// reaching into the private `kitty` submodule. Gated on
+// `kitty-encoder` because the helpers are only useful for
+// Kitty output. The v0.8.3 additions (the streaming
+// `wrap_for_tmux_to_writer`, the `PassthroughWriter`
+// adapter, and the end-to-end
+// `encode_passthrough_to_writer`) let the entire
+// encode + wrap + emit pipeline run in O(1) memory.
 #[cfg(feature = "kitty-encoder")]
 pub use kitty::wrap_for_tmux;
+#[cfg(feature = "kitty-encoder")]
+pub use kitty::wrap_for_tmux_to_writer;
+#[cfg(feature = "kitty-encoder")]
+pub use kitty::PassthroughWriter;
+#[cfg(feature = "kitty-encoder")]
+pub use kitty::encode_passthrough_to_writer;
 
 /// The Sixel graphics protocol encoder, gated on the
 /// `sixel-encoder` Cargo feature. Implemented as a private
@@ -1836,6 +2037,185 @@ mod tests {
             let last_end = s.rfind(';').unwrap();
             let last_controls = &s[last_start..last_end];
             assert_eq!(last_controls, "m=0");
+        });
+    }
+
+    // -- v0.8.3: streaming wrap_for_tmux tests -----------------------
+    //
+    // The v0.8.3 streaming wrap entry point
+    // `wrap_for_tmux_to_writer` writes the wrapped DCS bytes
+    // directly to a `&mut impl Write` sink instead of
+    // materialising them in a `Vec<u8>`. The
+    // `PassthroughWriter` adapter is the v0.8.3 building
+    // block for end-to-end O(1) streaming: combined with
+    // `encode_to_writer` via
+    // `encode_passthrough_to_writer`, the entire
+    // encode + wrap + emit pipeline runs in O(1) memory.
+    //
+    // These tests verify (a) byte-for-byte equivalence with
+    // the v0.8.0 `wrap_for_tmux` for various inputs, (b) the
+    // `PassthroughWriter` adapter's prefix/doubling/suffix
+    // semantics, and (c) the end-to-end
+    // `encode_passthrough_to_writer` entry point with and
+    // without the tmux passthrough opt-in.
+
+    /// Streaming wrap output must match the v0.8.0
+    /// `wrap_for_tmux` output byte-for-byte for a typical
+    /// Kitty APC payload. This pins the v0.8.3 refactor's
+    /// invariant: the streaming path and the `Vec<u8>` path
+    /// produce identical bytes for the same input.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn wrap_for_tmux_to_writer_matches_wrap_for_tmux() {
+        let inner: Vec<u8> =
+            b"\x1b_Ga=T,f=32,q=2,s=2,v=2;AAAA\x1b\\".to_vec();
+        let from_vec = super::kitty::wrap_for_tmux(inner.clone());
+        let mut from_streaming: Vec<u8> = Vec::new();
+        super::kitty::wrap_for_tmux_to_writer(&inner, &mut from_streaming)
+            .unwrap();
+        assert_eq!(from_vec, from_streaming);
+    }
+
+    /// Inner ESC bytes must be doubled in the streaming
+    /// output, matching the v0.8.0 `wrap_for_tmux` doubling
+    /// behaviour. ESCs at the introducer and terminator
+    /// (which are the only ESCs in a normal Kitty payload)
+    /// each become 2 ESCs.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn wrap_for_tmux_to_writer_doubles_inner_esc_bytes() {
+        let inner: Vec<u8> = b"\x1b_Ga=T\x1bTEST\x1b\\".to_vec();
+        let mut out: Vec<u8> = Vec::new();
+        super::kitty::wrap_for_tmux_to_writer(&inner, &mut out)
+            .unwrap();
+        // The streaming output must be byte-for-byte
+        // equal to the v0.8.0 `wrap_for_tmux` output.
+        let from_vec = super::kitty::wrap_for_tmux(inner.clone());
+        assert_eq!(out, from_vec);
+    }
+
+    /// Empty inner input must produce a valid empty
+    /// wrapped DCS: `\x1bPtmux;\x1b\\` (9 bytes). This
+    /// matches the v0.8.0 `wrap_for_tmux` behaviour for
+    /// empty input.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn wrap_for_tmux_to_writer_handles_empty() {
+        let mut out: Vec<u8> = Vec::new();
+        super::kitty::wrap_for_tmux_to_writer(&[], &mut out)
+            .unwrap();
+        assert_eq!(out, b"\x1bPtmux;\x1b\\");
+    }
+
+    /// `PassthroughWriter` must double ESC bytes in the
+    /// body (not the prefix/suffix). The first body byte
+    /// written triggers the prefix; subsequent bytes are
+    /// forwarded with ESC doubling; `finish()` writes the
+    /// suffix. The full output (prefix + doubled body +
+    /// suffix) must be byte-for-byte equal to the v0.8.0
+    /// `wrap_for_tmux` reference output.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn passthrough_writer_doubles_esc_in_body() {
+        use std::io::Write;
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut pw = super::kitty::PassthroughWriter::new(&mut out);
+            // Write a body with an ESC in the middle (not
+            // at the start or end of the body).
+            pw.write_all(b"\x1b_Ga=T\x1bTEST\x1b\\").unwrap();
+            pw.flush().unwrap();
+            // `finish()` writes the DCS terminator and
+            // returns the inner writer. Without this call
+            // the suffix would be missing and the test
+            // would fail (the `wrap_for_tmux` reference
+            // includes both prefix and suffix).
+            let _inner = pw.finish().unwrap();
+        }
+        // The DCS prefix is `ESC P tmux ;` (7 bytes).
+        assert!(out.starts_with(b"\x1bPtmux;"));
+        // The full output must be byte-for-byte equal to
+        // the v0.8.0 `wrap_for_tmux` reference output.
+        let reference =
+            super::kitty::wrap_for_tmux(b"\x1b_Ga=T\x1bTEST\x1b\\".to_vec());
+        assert_eq!(out, reference);
+    }
+
+    /// `PassthroughWriter::finish` for an empty body (no
+    /// `write` calls) must still produce a valid empty
+    /// wrapped DCS: prefix + suffix. This matches the
+    /// v0.8.0 `wrap_for_tmux` behaviour for empty input.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn passthrough_writer_finish_for_empty_body() {
+        let mut out: Vec<u8> = Vec::new();
+        let pw = super::kitty::PassthroughWriter::new(&mut out);
+        let _inner = pw.finish().unwrap();
+        assert_eq!(out, b"\x1bPtmux;\x1b\\");
+    }
+
+    /// End-to-end: when the tmux passthrough opt-in is
+    /// NOT set, `encode_passthrough_to_writer` must
+    /// delegate to `encode_to_writer` and produce the
+    /// raw APC bytes (no wrapping).
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn encode_passthrough_to_writer_without_tmux_skips_wrap() {
+        with_env(Some("xterm-kitty"), None, None, None, || {
+            let fb = FrameBuffer::new(2, 2);
+            let from_passthrough: Vec<u8> = {
+                let mut out: Vec<u8> = Vec::new();
+                super::kitty::encode_passthrough_to_writer(
+                    &fb, &mut out,
+                )
+                .unwrap();
+                out
+            };
+            let from_encode: Vec<u8> = {
+                let mut out: Vec<u8> = Vec::new();
+                super::kitty::encode_to_writer(&fb, &mut out)
+                    .unwrap();
+                out
+            };
+            // Without the tmux opt-in, the two outputs
+            // must be byte-for-byte equal.
+            assert_eq!(from_passthrough, from_encode);
+            // And the output must NOT be wrapped (no
+            // `\x1bPtmux;` prefix).
+            assert!(!from_passthrough.starts_with(b"\x1bPtmux;"));
+        });
+    }
+
+    /// End-to-end: when the tmux passthrough opt-in IS
+    /// set (DASHPASSTHROUGH + TMUX), the output must be
+    /// the wrapped DCS. This verifies the v0.8.3
+    /// end-to-end O(1) streaming path: encode + wrap
+    /// + emit in a single pass.
+    #[cfg(feature = "kitty-encoder")]
+    #[test]
+    fn encode_passthrough_to_writer_with_tmux_wraps() {
+        with_env(Some("xterm-kitty"), None, None, Some("1"), || {
+            let _tmux = EnvGuard::new("TMUX");
+            _tmux.set(Some("/tmp/tmux-1000/default,12345,0"));
+            let fb = FrameBuffer::new(2, 2);
+            let mut out: Vec<u8> = Vec::new();
+            super::kitty::encode_passthrough_to_writer(
+                &fb, &mut out,
+            )
+            .unwrap();
+            // With the tmux opt-in, the output MUST be
+            // wrapped: starts with the DCS prefix and
+            // ends with the DCS terminator.
+            assert!(out.starts_with(b"\x1bPtmux;"));
+            assert!(out.ends_with(b"\x1b\\"));
+            // The output must be byte-for-byte equal to
+            // the v0.8.0/v0.8.2 `dispatch(Protocol::Kitty,
+            // &fb)` reference output (which materialises
+            // both the encode and the wrap in Vecs). The
+            // streaming path must produce the same bytes.
+            let from_dispatch =
+                dispatch(Protocol::Kitty, &fb).unwrap();
+            assert_eq!(out, from_dispatch);
         });
     }
 }

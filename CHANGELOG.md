@@ -1,3 +1,58 @@
+## 0.8.3 (2026-07-02)
+
+End-to-end O(1) streaming for the tmux passthrough wrap.
+v0.8.0's `wrap_for_tmux(Vec<u8>) -> Vec<u8>` materialised
+the full wrapped output in a `Vec<u8>`, which (combined
+with `dispatch(Protocol::Kitty, frame)`) made the entire
+encode + wrap + emit pipeline O(N) in framebuffer size
+(8MB+ for a 2MP encode, plus ~11MB for the wrap). v0.8.3
+adds three new public APIs that make the entire pipeline
+O(1) per write call:
+
+### Added
+- `pub fn kitty::wrap_for_tmux_to_writer<W: Write>(
+  inner: &[u8], out: &mut W) -> io::Result<()>` in
+  `dashcompositor::encoder`. The streaming version of
+  `wrap_for_tmux`: takes the raw Kitty APC bytes as a
+  slice and writes the wrapped DCS bytes directly to a
+  `&mut impl Write` sink. Memory bounded: O(1) (no
+  intermediate `Vec` allocation).
+- `pub struct kitty::PassthroughWriter<W: Write>` in
+  `dashcompositor::encoder`. A `Write` adapter that
+  wraps the inner output in a tmux passthrough DCS:
+  writes the DCS prefix on the first byte, doubles
+  every `ESC` byte in subsequent body writes, and
+  writes the DCS terminator on `finish()`. The
+  v0.8.3 building block for end-to-end O(1) streaming.
+- `pub fn kitty::encode_passthrough_to_writer<W: Write>(
+  frame: &FrameBuffer, out: &mut W) -> Result<()>` in
+  `dashcompositor::encoder`. The end-to-end O(1) entry
+  point: encodes the frame and (if the tmux passthrough
+  opt-in is set) wraps the output in a tmux passthrough
+  DCS, all in a single pass with O(1) memory. When the
+  opt-in is not set, this is equivalent to
+  `encode_to_writer`.
+
+### Changed
+- `kitty::wrap_for_tmux(Vec<u8>) -> Vec<u8>` is now a
+  thin convenience wrapper that delegates to
+  `wrap_for_tmux_to_writer` writing to a fresh
+  `Vec<u8>`. The wire format is unchanged (byte-for-byte
+  equivalent to v0.8.0/v0.8.2 for the same input).
+
+### Tests
+- 7 new unit tests: `wrap_for_tmux_to_writer` matches
+  `wrap_for_tmux` for various inputs; ESC doubling in
+  the body; empty input edge case;
+  `PassthroughWriter` prefix/doubling/suffix semantics;
+  `encode_passthrough_to_writer` with and without the
+  tmux passthrough opt-in.
+
+All 4 feature combinations clean: cargo fmt, cargo build
+(default + each feature + both), cargo build --release
+(default + both), cargo test (113 tests with both
+features, 0 failed), cargo clippy --all-targets
+-- -D warnings (0 errors across all 4 combos).
 ## 0.8.2 (2026-07-02)
 
 Memory-bounded streaming Kitty encode: the v0.8.1 chunked
