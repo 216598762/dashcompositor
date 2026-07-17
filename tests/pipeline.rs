@@ -11,7 +11,7 @@
 //! - `encode_passthrough_to_writer()`
 
 use termcompositor::{
-    dispatch_to_writer, detect, FrameBuffer, LayerStack, Protocol, ProtocolEncoder, RectLayer,
+    dispatch_to_writer, detect, CanvasLayer, FrameBuffer, LayerStack, Protocol, ProtocolEncoder, RectLayer,
     SolidColor, TextLayer,
 };
 
@@ -430,5 +430,53 @@ mod error_paths {
             err.to_string(),
             "encoder failed: something broke"
         );
+    }
+}
+
+// -- CanvasLayer pipeline tests ---------------------------------
+
+#[cfg(all(feature = "kitty-encoder", feature = "sixel-encoder"))]
+mod canvas_pipeline {
+    use super::*;
+
+    #[test]
+    fn kitty_canvas_layer_pipeline() {
+        let mut stack = LayerStack::new();
+        stack.push(SolidColor::new(0, 0, 0, 255).with_z(0));
+        let mut canvas = CanvasLayer::new(10, 10).at(2, 2).with_z(10);
+        canvas.draw_pixel(0, 0, [255, 255, 255, 255]);
+        canvas.draw_line(0, 0, 9, 9, [0, 255, 0, 255]);
+        canvas.draw_circle(5, 5, 3, [255, 0, 0, 255]);
+        stack.push(canvas);
+
+        let mut fb = FrameBuffer::new(20, 20);
+        stack.render(&mut fb);
+
+        let bytes = Protocol::Kitty.encode(&fb).unwrap();
+        assert!(bytes.starts_with(b"\x1b_G"));
+        assert!(bytes.ends_with(b"\x1b\\"));
+        // Diagonal pixel at canvas-local (1,1) -> fb (3,3) should be green.
+        assert_eq!(fb.get_pixel(3, 3), Some(&[0, 255, 0, 255]));
+        // Circle cardinal point at canvas-local (5,2) -> fb (7,4) should be red.
+        assert_eq!(fb.get_pixel(7, 4), Some(&[255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn sixel_canvas_layer_pipeline() {
+        let mut stack = LayerStack::new();
+        stack.push(SolidColor::new(0, 0, 0, 255).with_z(0));
+        let mut canvas = CanvasLayer::new(10, 10).at(2, 2).with_z(10);
+        canvas.draw_pixel(0, 0, [255, 255, 255, 255]);
+        canvas.draw_line(0, 0, 9, 9, [0, 255, 0, 255]);
+        canvas.draw_circle(5, 5, 3, [255, 0, 0, 255]);
+        stack.push(canvas);
+
+        let mut fb = FrameBuffer::new(20, 20);
+        stack.render(&mut fb);
+
+        let bytes = Protocol::Sixel.encode(&fb).unwrap();
+        assert!(!bytes.is_empty(), "Sixel canvas output must not be empty");
+        // Diagonal pixel at canvas-local (1,1) -> fb (3,3) should be green.
+        assert_eq!(fb.get_pixel(3, 3), Some(&[0, 255, 0, 255]));
     }
 }

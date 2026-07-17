@@ -661,6 +661,602 @@ impl Layer for ImageLayer {
     }
 }
 
+/// A rectangular border layer: draws the outline of a rectangle
+/// at a specific position and size. Unlike [`RectLayer`] which
+/// fills the interior, `BorderLayer` only draws the edges.
+///
+/// `border_width` controls the thickness of the border in pixels.
+/// A `border_width` of `1` draws a 1-pixel-wide outline. The
+/// border is drawn inward from the rectangle's edges.
+///
+/// `bounds()` returns the full rectangle including the border.
+/// `render` writes only the border pixels, leaving the interior
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BorderLayer {
+    /// Left edge, inclusive.
+    pub x: u32,
+    /// Top edge, inclusive.
+    pub y: u32,
+    /// Width in cells/pixels (including border).
+    pub width: u32,
+    /// Height in cells/pixels (including border).
+    pub height: u32,
+    /// `[R, G, B, A]` in `0..=255` per channel.
+    pub color: [u8; 4],
+    /// Border thickness in pixels (drawn inward from edges).
+    pub border_width: u32,
+    z: u32,
+    name: String,
+}
+
+impl BorderLayer {
+    /// Creates a new border layer at `(x, y)` with the given
+    /// `width x height`, RGBA `color`, and `border_width`.
+    pub fn new(x: u32, y: u32, width: u32, height: u32, color: [u8; 4], border_width: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            color,
+            border_width,
+            z: 0,
+            name: format!("Border({x},{y},{width}x{height},bw={border_width})"),
+        }
+    }
+
+    /// Builder: sets the default z-order.
+    #[must_use]
+    pub fn with_z(mut self, z: u32) -> Self {
+        self.z = z;
+        self
+    }
+
+    /// Builder: sets a human-readable name.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+}
+
+impl Layer for BorderLayer {
+    fn z_order(&self) -> u32 {
+        self.z
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn bounds(&self) -> Option<Rect> {
+        Some(Rect::new(self.x, self.y, self.width, self.height))
+    }
+
+    fn render(&self, target: &mut FrameBuffer, offset: (u32, u32), opacity: f32) {
+        let ox = self.x.saturating_add(offset.0);
+        let oy = self.y.saturating_add(offset.1);
+        let effective = (f32::from(self.color[3]) / 255.0 * opacity).clamp(0.0, 1.0);
+        if effective == 0.0 {
+            return;
+        }
+        if self.border_width == 0 { return; }
+        let bw = self.border_width.min(self.width).min(self.height);
+        if bw == 0 {
+            return;
+        }
+        // Top edge: rows y..y+bw, columns x..x+width
+        for sy in 0..bw {
+            for sx in 0..self.width {
+                let tx = ox + sx;
+                let ty = oy + sy;
+                if let Some(px) = target.get_pixel_mut(tx, ty) {
+                    crate::framebuffer::blend_over(px, &self.color, effective);
+                }
+            }
+        }
+        // Bottom edge: rows (y+height-bw)..(y+height), columns x..x+width
+        for sy in (self.height - bw)..self.height {
+            for sx in 0..self.width {
+                let tx = ox + sx;
+                let ty = oy + sy;
+                if let Some(px) = target.get_pixel_mut(tx, ty) {
+                    crate::framebuffer::blend_over(px, &self.color, effective);
+                }
+            }
+        }
+        // Left edge: rows (y+bw)..(y+height-bw), columns x..x+bw
+        for sy in bw..(self.height - bw) {
+            for sx in 0..bw {
+                let tx = ox + sx;
+                let ty = oy + sy;
+                if let Some(px) = target.get_pixel_mut(tx, ty) {
+                    crate::framebuffer::blend_over(px, &self.color, effective);
+                }
+            }
+        }
+        // Right edge: rows (y+bw)..(y+height-bw), columns (x+width-bw)..(x+width)
+        for sy in bw..(self.height - bw) {
+            for sx in (self.width - bw)..self.width {
+                let tx = ox + sx;
+                let ty = oy + sy;
+                if let Some(px) = target.get_pixel_mut(tx, ty) {
+                    crate::framebuffer::blend_over(px, &self.color, effective);
+                }
+            }
+        }
+    }
+}
+
+/// A freeform drawing canvas layer.
+///
+/// `CanvasLayer` provides a pixel-level drawing API that users
+/// can draw into before the compositor renders it. Unlike other
+/// layer types which are created with a fixed shape, `CanvasLayer`
+/// starts as a transparent buffer and offers methods to draw
+/// individual pixels, lines, and circles.
+///
+/// After drawing, the layer composites its pixels into the target
+/// framebuffer using standard alpha blending.
+///
+/// # Example
+///
+/// ```
+/// use termcompositor::{CanvasLayer, Layer};
+/// use termcompositor::FrameBuffer;
+///
+/// let mut canvas = CanvasLayer::new(20, 10);
+/// canvas.draw_pixel(5, 3, [255, 0, 0, 255]);
+/// canvas.draw_line(0, 0, 19, 9, [0, 255, 0, 255]);
+/// canvas.draw_circle(10, 5, 4, [0, 0, 255, 255]);
+///
+/// let mut fb = FrameBuffer::new(20, 10);
+/// canvas.render(&mut fb, (0, 0), 1.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct CanvasLayer {
+    /// Left edge, inclusive.
+    pub x: u32,
+    /// Top edge, inclusive.
+    pub y: u32,
+    width: u32,
+    height: u32,
+    pixels: Vec<[u8; 4]>,
+    z: u32,
+    name: String,
+}
+
+impl CanvasLayer {
+    /// Creates a new empty canvas of the given dimensions.
+    /// All pixels start as fully transparent.
+    pub fn new(width: u32, height: u32) -> Self {
+        let count = (width as usize).saturating_mul(height as usize);
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            pixels: vec![[0, 0, 0, 0]; count],
+            z: 0,
+            name: format!("Canvas({width}x{height})"),
+        }
+    }
+
+    /// Sets the position of this canvas in the framebuffer.
+    #[must_use]
+    pub fn at(mut self, x: u32, y: u32) -> Self {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
+    /// Builder: sets the default z-order.
+    #[must_use]
+    pub fn with_z(mut self, z: u32) -> Self {
+        self.z = z;
+        self
+    }
+
+    /// Builder: sets a human-readable name.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Canvas width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Canvas height in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Draws a single pixel at `(px, py)` in canvas-local
+    /// coordinates. Coordinates outside the canvas are silently
+    /// ignored.
+    pub fn draw_pixel(&mut self, px: u32, py: u32, color: [u8; 4]) {
+        if px < self.width && py < self.height {
+            let idx = (py as usize) * (self.width as usize) + (px as usize);
+            self.pixels[idx] = color;
+        }
+    }
+
+    /// Returns a reference to the pixel at `(px, py)` in
+    /// canvas-local coordinates, or `None` if out of bounds.
+    pub fn get_pixel(&self, px: u32, py: u32) -> Option<[u8; 4]> {
+        if px < self.width && py < self.height {
+            let idx = (py as usize) * (self.width as usize) + (px as usize);
+            Some(self.pixels[idx])
+        } else {
+            None
+        }
+    }
+
+    /// Draws a line from `(x0, y0)` to `(x1, y1)` using
+    /// Bresenham's line algorithm. Negative coordinates are
+    /// silently clipped (via wrapping to `u32`); coordinates
+    /// outside the canvas are ignored.
+    pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: [u8; 4]) {
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut x = x0;
+        let mut y = y0;
+        loop {
+            if x >= 0 && y >= 0 {
+                self.draw_pixel(x as u32, y as u32, color);
+            }
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// Draws a circle centered at `(cx, cy)` with the given
+    /// `radius` using the midpoint circle algorithm. Negative
+    /// coordinates are silently clipped (via wrapping to `u32`);
+    /// coordinates outside the canvas are ignored.
+    pub fn draw_circle(&mut self, cx: i32, cy: i32, radius: i32, color: [u8; 4]) {
+        if radius < 0 {
+            return;
+        }
+        let mut x = radius;
+        let mut y = 0;
+        let mut err = 1 - radius;
+        while x >= y {
+            // Draw 8 octants
+            self.draw_pixel((cx + x) as u32, (cy + y) as u32, color);
+            self.draw_pixel((cx - x) as u32, (cy + y) as u32, color);
+            self.draw_pixel((cx + x) as u32, (cy - y) as u32, color);
+            self.draw_pixel((cx - x) as u32, (cy - y) as u32, color);
+            self.draw_pixel((cx + y) as u32, (cy + x) as u32, color);
+            self.draw_pixel((cx - y) as u32, (cy + x) as u32, color);
+            self.draw_pixel((cx + y) as u32, (cy - x) as u32, color);
+            self.draw_pixel((cx - y) as u32, (cy - x) as u32, color);
+            y += 1;
+            if err < 0 {
+                err += 2 * y + 1;
+            } else {
+                x -= 1;
+                err += 2 * (y - x) + 1;
+            }
+        }
+    }
+
+    /// Fills a rectangle in canvas-local coordinates with the
+    /// given colour. Coordinates outside the canvas are
+    /// silently clipped.
+    pub fn fill_rect(&mut self, rx: u32, ry: u32, rw: u32, rh: u32, color: [u8; 4]) {
+        for sy in ry..ry.saturating_add(rh) {
+            for sx in rx..rx.saturating_add(rw) {
+                self.draw_pixel(sx, sy, color);
+            }
+        }
+    }
+
+    /// Clears the canvas to fully transparent.
+    pub fn clear(&mut self) {
+        for px in &mut self.pixels {
+            *px = [0, 0, 0, 0];
+        }
+    }
+}
+
+impl Layer for CanvasLayer {
+    fn z_order(&self) -> u32 {
+        self.z
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn bounds(&self) -> Option<Rect> {
+        Some(Rect::new(self.x, self.y, self.width, self.height))
+    }
+
+    fn render(&self, target: &mut FrameBuffer, offset: (u32, u32), opacity: f32) {
+        let ox = self.x.saturating_add(offset.0);
+        let oy = self.y.saturating_add(offset.1);
+        for sy in 0..self.height {
+            for sx in 0..self.width {
+                let src = self.pixels[(sy as usize) * (self.width as usize) + (sx as usize)];
+                if src[3] == 0 {
+                    continue; // Skip transparent pixels
+                }
+                let tx = ox + sx;
+                let ty = oy + sy;
+                let src_alpha = f32::from(src[3]) / 255.0 * opacity;
+                if let Some(px) = target.get_pixel_mut(tx, ty) {
+                    crate::framebuffer::blend_over(px, &src, src_alpha);
+                }
+            }
+        }
+    }
+}
+
+/// A gradient layer that interpolates between two colours.
+///
+/// Supports two gradient types:
+/// - **Linear**: interpolates from `start_color` to `end_color`
+///   along a line defined by `(start_x, start_y)` →
+///   `(end_x, end_y)`. The gradient extends across the
+///   bounding box defined by `x, y, width, height`.
+/// - **Radial**: interpolates from `start_color` to `end_color`
+///   from `center_x, center_y` outward to `radius` pixels.
+///
+/// Colour interpolation is performed in sRGB space (per-channel
+/// linear interpolation) which is simple and fast. For
+/// perceptually uniform gradients, a future version could
+/// interpolate in Oklab or Oklch.
+#[derive(Debug, Clone)]
+pub struct GradientLayer {
+    /// Left edge, inclusive.
+    pub x: u32,
+    /// Top edge, inclusive.
+    pub y: u32,
+    /// Width of the gradient area.
+    pub width: u32,
+    /// Height of the gradient area.
+    pub height: u32,
+    /// `[R, G, B, A]` at the start of the gradient.
+    pub start_color: [u8; 4],
+    /// `[R, G, B, A]` at the end of the gradient.
+    pub end_color: [u8; 4],
+    /// The type of gradient.
+    pub kind: GradientKind,
+    z: u32,
+    name: String,
+}
+
+/// The type of gradient interpolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradientKind {
+    /// Linear gradient from `(start_x, start_y)` to `(end_x, end_y)`
+    /// within the gradient's bounding box. Coordinates are relative
+    /// to the gradient's top-left corner.
+    Linear {
+        /// Start X coordinate (relative to gradient origin).
+        start_x: u32,
+        /// Start Y coordinate (relative to gradient origin).
+        start_y: u32,
+        /// End X coordinate (relative to gradient origin).
+        end_x: u32,
+        /// End Y coordinate (relative to gradient origin).
+        end_y: u32,
+    },
+    /// Radial gradient from `center_x, center_y` outward to `radius`
+    /// pixels. Coordinates are relative to the gradient's top-left
+    /// corner.
+    Radial {
+        /// Center X coordinate (relative to gradient origin).
+        center_x: u32,
+        /// Center Y coordinate (relative to gradient origin).
+        center_y: u32,
+        /// Radius in pixels.
+        radius: u32,
+    },
+}
+
+impl GradientLayer {
+    /// Creates a new linear gradient layer.
+    pub fn linear(
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        start_color: [u8; 4],
+        end_color: [u8; 4],
+        start_x: u32,
+        start_y: u32,
+        end_x: u32,
+        end_y: u32,
+    ) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            start_color,
+            end_color,
+            kind: GradientKind::Linear {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+            },
+            z: 0,
+            name: "GradientLayer".to_owned(),
+        }
+    }
+
+    /// Creates a new radial gradient layer.
+    pub fn radial(
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        start_color: [u8; 4],
+        end_color: [u8; 4],
+        center_x: u32,
+        center_y: u32,
+        radius: u32,
+    ) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            start_color,
+            end_color,
+            kind: GradientKind::Radial {
+                center_x,
+                center_y,
+                radius,
+            },
+            z: 0,
+            name: "GradientLayer".to_owned(),
+        }
+    }
+
+    /// Builder: sets the default z-order.
+    #[must_use]
+    pub fn with_z(mut self, z: u32) -> Self {
+        self.z = z;
+        self
+    }
+
+    /// Builder: sets a human-readable name.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Interpolates between `start_color` and `end_color` at
+    /// position `t` in `0.0..=1.0`. Returns the blended RGBA
+    /// colour.
+    fn interpolate(t: f32, start: [u8; 4], end: [u8; 4]) -> [u8; 4] {
+        let t = t.clamp(0.0, 1.0);
+        let inv = 1.0 - t;
+        [
+            (f32::from(start[0]) * inv + f32::from(end[0]) * t).round() as u8,
+            (f32::from(start[1]) * inv + f32::from(end[1]) * t).round() as u8,
+            (f32::from(start[2]) * inv + f32::from(end[2]) * t).round() as u8,
+            (f32::from(start[3]) * inv + f32::from(end[3]) * t).round() as u8,
+        ]
+    }
+}
+
+impl Layer for GradientLayer {
+    fn z_order(&self) -> u32 {
+        self.z
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn bounds(&self) -> Option<Rect> {
+        Some(Rect::new(self.x, self.y, self.width, self.height))
+    }
+
+    fn render(&self, target: &mut FrameBuffer, offset: (u32, u32), opacity: f32) {
+        let ox = self.x.saturating_add(offset.0);
+        let oy = self.y.saturating_add(offset.1);
+        let effective = opacity.clamp(0.0, 1.0);
+        if effective == 0.0 {
+            return;
+        }
+
+        match self.kind {
+            GradientKind::Linear {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+            } => {
+                // Compute the direction vector and its squared length.
+                let dx = end_x as f32 - start_x as f32;
+                let dy = end_y as f32 - start_y as f32;
+                let len_sq = dx * dx + dy * dy;
+
+                for sy in 0..self.height {
+                    for sx in 0..self.width {
+                        let tx = ox + sx;
+                        let ty = oy + sy;
+                        let Some(px) = target.get_pixel_mut(tx, ty) else {
+                            continue;
+                        };
+
+                        // Project (sx, sy) onto the gradient line.
+                        let px_f = sx as f32 - start_x as f32;
+                        let py_f = sy as f32 - start_y as f32;
+                        let t = if len_sq == 0.0 {
+                            0.0
+                        } else {
+                            (px_f * dx + py_f * dy) / len_sq
+                        };
+
+                        let colour = Self::interpolate(t, self.start_color, self.end_color);
+                        let src_alpha = f32::from(colour[3]) / 255.0 * effective;
+                        crate::framebuffer::blend_over(px, &colour, src_alpha);
+                    }
+                }
+            }
+            GradientKind::Radial {
+                center_x,
+                center_y,
+                radius,
+            } => {
+                let radius_f = radius as f32;
+                let cx = center_x as f32;
+                let cy = center_y as f32;
+
+                for sy in 0..self.height {
+                    for sx in 0..self.width {
+                        let tx = ox + sx;
+                        let ty = oy + sy;
+                        let Some(px) = target.get_pixel_mut(tx, ty) else {
+                            continue;
+                        };
+
+                        // Distance from the pixel to the center.
+                        let dx = sx as f32 - cx;
+                        let dy = sy as f32 - cy;
+                        let dist = (dx * dx + dy * dy).sqrt();
+
+                        let t = if radius_f == 0.0 {
+                            0.0
+                        } else {
+                            dist / radius_f
+                        };
+
+                        let colour = Self::interpolate(t, self.start_color, self.end_color);
+                        let src_alpha = f32::from(colour[3]) / 255.0 * effective;
+                        crate::framebuffer::blend_over(px, &colour, src_alpha);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A [`Layer`] plus the per-entry control state managed by
 /// [`crate::LayerStack`]: opacity, visibility, optional z-order
 /// override, and an optional custom name.
@@ -779,8 +1375,9 @@ impl std::fmt::Debug for LayerEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{Layer, LayerEntry, RectLayer, SolidColor, TextLayer};
+    use super::{BorderLayer, CanvasLayer, GradientKind, GradientLayer, Layer, LayerEntry, RectLayer, SolidColor, TextLayer};
     use crate::framebuffer::FrameBuffer;
+    use proptest::prelude::*;
     use crate::geometry::Rect;
 
     #[test]
@@ -1213,6 +1810,774 @@ mod tests {
         assert_eq!(e.name(), "a");
         e.set_name("b");
         assert_eq!(e.name(), "b");
+    }
+
+    // ── CanvasLayer tests ──────────────────────────────────────────────────'
+
+    #[test]
+    fn canvas_layer_new_defaults() {
+        let c = CanvasLayer::new(10, 8);
+        assert_eq!(c.width(), 10);
+        assert_eq!(c.height(), 8);
+        assert_eq!(c.z_order(), 0);
+        assert!(c.bounds().is_some());
+        // All pixels start transparent.
+        for y in 0..8 {
+            for x in 0..10 {
+                assert_eq!(c.get_pixel(x, y), Some([0, 0, 0, 0]));
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_layer_builders() {
+        let c = CanvasLayer::new(5, 5)
+            .at(3, 4)
+            .with_z(7)
+            .with_name("my-canvas");
+        assert_eq!(c.x, 3);
+        assert_eq!(c.y, 4);
+        assert_eq!(c.z_order(), 7);
+        assert_eq!(c.name(), "my-canvas");
+    }
+
+    #[test]
+    fn canvas_layer_bounds() {
+        let c = CanvasLayer::new(10, 20).at(5, 6);
+        assert_eq!(c.bounds(), Some(Rect::new(5, 6, 10, 20)));
+    }
+
+    #[test]
+    fn canvas_layer_draw_pixel() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.draw_pixel(2, 3, [255, 100, 50, 200]);
+        assert_eq!(c.get_pixel(2, 3), Some([255, 100, 50, 200]));
+        // Other pixels remain transparent.
+        assert_eq!(c.get_pixel(0, 0), Some([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_draw_pixel_out_of_bounds_ignored() {
+        let mut c = CanvasLayer::new(3, 3);
+        c.draw_pixel(10, 10, [255, 0, 0, 255]);
+        assert_eq!(c.get_pixel(10, 10), None);
+        assert_eq!(c.get_pixel(0, 0), Some([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_draw_line_horizontal() {
+        let mut c = CanvasLayer::new(10, 1);
+        c.draw_line(0, 0, 9, 0, [0, 255, 0, 255]);
+        for x in 0..10 {
+            assert_eq!(c.get_pixel(x, 0), Some([0, 255, 0, 255]));
+        }
+    }
+
+    #[test]
+    fn canvas_layer_draw_line_vertical() {
+        let mut c = CanvasLayer::new(1, 10);
+        c.draw_line(0, 0, 0, 9, [255, 0, 0, 255]);
+        for y in 0..10 {
+            assert_eq!(c.get_pixel(0, y), Some([255, 0, 0, 255]));
+        }
+    }
+
+    #[test]
+    fn canvas_layer_draw_line_diagonal() {
+        let mut c = CanvasLayer::new(10, 10);
+        c.draw_line(0, 0, 9, 9, [0, 0, 255, 255]);
+        for i in 0..10 {
+            assert_eq!(c.get_pixel(i, i), Some([0, 0, 255, 255]));
+        }
+    }
+
+    #[test]
+    fn canvas_layer_draw_circle_basic() {
+        let mut c = CanvasLayer::new(21, 21);
+        c.draw_circle(10, 10, 5, [255, 255, 0, 255]);
+        // The 4 cardinal points should be drawn.
+        assert_eq!(c.get_pixel(10, 5), Some([255, 255, 0, 255]));  // top
+        assert_eq!(c.get_pixel(10, 15), Some([255, 255, 0, 255])); // bottom
+        assert_eq!(c.get_pixel(5, 10), Some([255, 255, 0, 255]));  // left
+        assert_eq!(c.get_pixel(15, 10), Some([255, 255, 0, 255])); // right
+        // Center should be empty (no fill).
+        assert_eq!(c.get_pixel(10, 10), Some([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_draw_circle_zero_radius() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.draw_circle(2, 2, 0, [255, 0, 0, 255]);
+        // radius=0 draws only the center.
+        assert_eq!(c.get_pixel(2, 2), Some([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn canvas_layer_draw_circle_negative_radius_noop() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.draw_circle(2, 2, -1, [255, 0, 0, 255]);
+        assert_eq!(c.get_pixel(2, 2), Some([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_fill_rect() {
+        let mut c = CanvasLayer::new(10, 10);
+        c.fill_rect(2, 2, 3, 3, [100, 100, 100, 255]);
+        // Inside the filled rect.
+        assert_eq!(c.get_pixel(2, 2), Some([100, 100, 100, 255]));
+        assert_eq!(c.get_pixel(4, 4), Some([100, 100, 100, 255]));
+        // Outside.
+        assert_eq!(c.get_pixel(1, 1), Some([0, 0, 0, 0]));
+        assert_eq!(c.get_pixel(5, 5), Some([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_clear() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.draw_pixel(2, 2, [255, 0, 0, 255]);
+        c.fill_rect(0, 0, 5, 5, [0, 255, 0, 128]);
+        c.clear();
+        for y in 0..5 {
+            for x in 0..5 {
+                assert_eq!(c.get_pixel(x, y), Some([0, 0, 0, 0]));
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_layer_render_composites_to_framebuffer() {
+        let mut c = CanvasLayer::new(5, 5).at(1, 1);
+        c.draw_pixel(0, 0, [255, 0, 0, 255]); // canvas-local (0,0) → fb (1,1)
+        c.draw_pixel(4, 4, [0, 255, 0, 255]); // canvas-local (4,4) → fb (5,5)
+
+        let mut fb = FrameBuffer::new(10, 10);
+        c.render(&mut fb, (0, 0), 1.0);
+
+        assert_eq!(fb.get_pixel(1, 1), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(5, 5), Some(&[0, 255, 0, 255]));
+        assert_eq!(fb.get_pixel(0, 0), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_render_offset_translates() {
+        let mut c = CanvasLayer::new(3, 3);
+        c.draw_pixel(1, 1, [100, 200, 50, 255]);
+
+        let mut fb = FrameBuffer::new(10, 10);
+        c.render(&mut fb, (2, 3), 1.0);
+
+        assert_eq!(fb.get_pixel(3, 4), Some(&[100, 200, 50, 255]));
+        assert_eq!(fb.get_pixel(1, 1), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_render_opacity_blends() {
+        let mut c = CanvasLayer::new(1, 1);
+        c.draw_pixel(0, 0, [255, 0, 0, 255]);
+
+        let mut fb = FrameBuffer::new(1, 1);
+        c.render(&mut fb, (0, 0), 0.5);
+
+        let px = fb.get_pixel(0, 0).unwrap();
+        assert_eq!(px[0], 255);
+        assert!(px[3] < 255, "alpha should be < 255 at 50% opacity, got {}", px[3]);
+    }
+
+    #[test]
+    fn canvas_layer_render_skips_transparent_pixels() {
+        let mut c = CanvasLayer::new(3, 3);
+        // Only draw one pixel; others stay transparent.
+        c.draw_pixel(1, 1, [0, 0, 255, 255]);
+
+        let mut fb = FrameBuffer::new(3, 3);
+        // Fill fb with red first.
+        for px in fb.pixels_mut() {
+            *px = [255, 0, 0, 255];
+        }
+        c.render(&mut fb, (0, 0), 1.0);
+
+        // The drawn pixel should be blue.
+        assert_eq!(fb.get_pixel(1, 1), Some(&[0, 0, 255, 255]));
+        // Other pixels should remain red (transparent canvas pixels skipped).
+        assert_eq!(fb.get_pixel(0, 0), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(2, 2), Some(&[255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn canvas_layer_render_clips_outside_framebuffer() {
+        let mut c = CanvasLayer::new(5, 5).at(8, 8);
+        c.draw_pixel(0, 0, [255, 0, 0, 255]);
+
+        let mut fb = FrameBuffer::new(5, 5);
+        c.render(&mut fb, (0, 0), 1.0);
+
+        // All pixels should remain transparent (canvas is outside).
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
+        }
+    }
+
+    // ── CanvasLayer proptests ────────────────────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_draw_pixel_never_panics(
+            w in 1u32..50,
+            h in 1u32..50,
+            px in 0u32..100,
+            py in 0u32..100,
+            r in 0u8..=255,
+            g in 0u8..=255,
+            b in 0u8..=255,
+            a in 0u8..=255,
+        ) {
+            let mut c = CanvasLayer::new(w, h);
+            c.draw_pixel(px, py, [r, g, b, a]);
+            // Out-of-bounds draws are silently ignored.
+            if px < w && py < h {
+                prop_assert_eq!(c.get_pixel(px, py), Some([r, g, b, a]));
+            } else {
+                prop_assert_eq!(c.get_pixel(px, py), None);
+            }
+        }
+
+        #[test]
+        fn prop_draw_line_never_panics(
+            w in 1u32..50,
+            h in 1u32..50,
+            x0 in -5i32..50,
+            y0 in -5i32..50,
+            x1 in -5i32..50,
+            y1 in -5i32..50,
+        ) {
+            let mut c = CanvasLayer::new(w, h);
+            c.draw_line(x0, y0, x1, y1, [255, 0, 0, 255]);
+            // All pixels on the line path that are in-bounds should be set.
+            // The endpoint must always be drawn (if in bounds).
+            if x1 >= 0 && y1 >= 0 && (x1 as u32) < w && (y1 as u32) < h {
+                prop_assert_eq!(
+                    c.get_pixel(x1 as u32, y1 as u32),
+                    Some([255, 0, 0, 255]),
+                    "endpoint ({}, {}) must be drawn", x1, y1
+                );
+            }
+            if x0 >= 0 && y0 >= 0 && (x0 as u32) < w && (y0 as u32) < h {
+                prop_assert_eq!(
+                    c.get_pixel(x0 as u32, y0 as u32),
+                    Some([255, 0, 0, 255]),
+                    "startpoint ({}, {}) must be drawn", x0, y0
+                );
+            }
+        }
+
+        #[test]
+        fn prop_draw_line_deterministic(
+            w in 5u32..50,
+            h in 5u32..50,
+            x0 in 0i32..25,
+            y0 in 0i32..25,
+            x1 in 0i32..25,
+            y1 in 0i32..25,
+        ) {
+            // Drawing the same line twice produces identical results.
+            let mut a = CanvasLayer::new(w, h);
+            a.draw_line(x0, y0, x1, y1, [0, 255, 0, 255]);
+            let mut b = CanvasLayer::new(w, h);
+            b.draw_line(x0, y0, x1, y1, [0, 255, 0, 255]);
+            for y in 0..h {
+                for x in 0..w {
+                    prop_assert_eq!(
+                        a.get_pixel(x, y), b.get_pixel(x, y),
+                        "pixel ({}, {}) differs between identical draws", x, y
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn prop_draw_circle_never_panics(
+            w in 1u32..50,
+            h in 1u32..50,
+            cx in -10i32..50,
+            cy in -10i32..50,
+            radius in 0i32..25,
+        ) {
+            let mut c = CanvasLayer::new(w, h);
+            c.draw_circle(cx, cy, radius, [0, 0, 255, 255]);
+            // radius=0 should draw exactly the center pixel.
+            if radius == 0 && cx >= 0 && cy >= 0 && (cx as u32) < w && (cy as u32) < h {
+                prop_assert_eq!(
+                    c.get_pixel(cx as u32, cy as u32),
+                    Some([0, 0, 255, 255]),
+                    "center pixel must be drawn for radius=0"
+                );
+            }
+        }
+
+        #[test]
+        fn prop_draw_circle_center_is_drawn(
+            w in 10u32..50,
+            h in 10u32..50,
+            radius in 1i32..10,
+        ) {
+            let cx = (w / 2) as i32;
+            let cy = (h / 2) as i32;
+            let mut c = CanvasLayer::new(w, h);
+            c.draw_circle(cx, cy, radius, [0, 255, 0, 255]);
+            // The 4 cardinal points should be drawn.
+            // Top: (cx, cy - radius)
+            let top_y = cy - radius;
+            if top_y >= 0 {
+                prop_assert_eq!(
+                    c.get_pixel(cx as u32, top_y as u32),
+                    Some([0, 255, 0, 255]),
+                    "top cardinal must be drawn"
+                );
+            }
+        }
+
+        #[test]
+        fn prop_draw_circle_negative_radius_is_noop(
+            w in 1u32..50,
+            h in 1u32..50,
+            cx in 0i32..50,
+            cy in 0i32..50,
+        ) {
+            let mut c = CanvasLayer::new(w, h);
+            c.draw_circle(cx, cy, -1, [255, 0, 0, 255]);
+            // Nothing should be drawn.
+            for y in 0..h {
+                for x in 0..w {
+                    prop_assert_eq!(
+                        c.get_pixel(x, y), Some([0, 0, 0, 0]),
+                        "negative radius must not draw anything"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── BorderLayer tests ───────────────────────────────────────────────'
+
+    #[test]
+    fn border_layer_new_defaults() {
+        let b = BorderLayer::new(2, 3, 10, 8, [255, 0, 0, 255], 1);
+        assert_eq!(b.x, 2);
+        assert_eq!(b.y, 3);
+        assert_eq!(b.width, 10);
+        assert_eq!(b.height, 8);
+        assert_eq!(b.color, [255, 0, 0, 255]);
+        assert_eq!(b.border_width, 1);
+        assert_eq!(b.z_order(), 0);
+    }
+
+    #[test]
+    fn border_layer_builders() {
+        let b = BorderLayer::new(0, 0, 5, 5, [0, 255, 0, 255], 2)
+            .with_z(7)
+            .with_name("box-border");
+        assert_eq!(b.z_order(), 7);
+        assert_eq!(b.name(), "box-border");
+    }
+
+    #[test]
+    fn border_layer_bounds() {
+        let b = BorderLayer::new(3, 4, 5, 6, [0, 0, 0, 255], 1);
+        assert_eq!(b.bounds(), Some(Rect::new(3, 4, 5, 6)));
+    }
+
+    #[test]
+    fn border_layer_render_1px_draws_outline_only() {
+        let b = BorderLayer::new(1, 1, 3, 3, [255, 0, 0, 255], 1);
+        let mut fb = FrameBuffer::new(5, 5);
+        b.render(&mut fb, (0, 0), 1.0);
+        // Top edge
+        assert_eq!(fb.get_pixel(1, 1), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(2, 1), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(3, 1), Some(&[255, 0, 0, 255]));
+        // Bottom edge
+        assert_eq!(fb.get_pixel(1, 3), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(2, 3), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(3, 3), Some(&[255, 0, 0, 255]));
+        // Left edge
+        assert_eq!(fb.get_pixel(1, 2), Some(&[255, 0, 0, 255]));
+        // Right edge
+        assert_eq!(fb.get_pixel(3, 2), Some(&[255, 0, 0, 255]));
+        // Interior should be transparent
+        assert_eq!(fb.get_pixel(2, 2), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn border_layer_render_2px_border() {
+        let b = BorderLayer::new(0, 0, 6, 6, [0, 255, 0, 255], 2);
+        let mut fb = FrameBuffer::new(6, 6);
+        b.render(&mut fb, (0, 0), 1.0);
+        // Top 2 rows should be green
+        for x in 0..6 {
+            assert_eq!(fb.get_pixel(x, 0), Some(&[0, 255, 0, 255]));
+            assert_eq!(fb.get_pixel(x, 1), Some(&[0, 255, 0, 255]));
+        }
+        // Bottom 2 rows should be green
+        for x in 0..6 {
+            assert_eq!(fb.get_pixel(x, 4), Some(&[0, 255, 0, 255]));
+            assert_eq!(fb.get_pixel(x, 5), Some(&[0, 255, 0, 255]));
+        }
+        // Left 2 columns (middle rows) should be green
+        assert_eq!(fb.get_pixel(0, 2), Some(&[0, 255, 0, 255]));
+        assert_eq!(fb.get_pixel(1, 2), Some(&[0, 255, 0, 255]));
+        // Right 2 columns (middle rows) should be green
+        assert_eq!(fb.get_pixel(4, 2), Some(&[0, 255, 0, 255]));
+        assert_eq!(fb.get_pixel(5, 2), Some(&[0, 255, 0, 255]));
+        // Interior (2x2 center) should be transparent
+        assert_eq!(fb.get_pixel(2, 2), Some(&[0, 0, 0, 0]));
+        assert_eq!(fb.get_pixel(3, 3), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn border_layer_render_zero_opacity_noop() {
+        let b = BorderLayer::new(0, 0, 5, 5, [255, 0, 0, 255], 1);
+        let mut fb = FrameBuffer::new(5, 5);
+        b.render(&mut fb, (0, 0), 0.0);
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn border_layer_render_offset_translates() {
+        let b = BorderLayer::new(0, 0, 3, 3, [0, 0, 255, 255], 1);
+        let mut fb = FrameBuffer::new(6, 6);
+        b.render(&mut fb, (2, 2), 1.0);
+        // Border should appear at offset position
+        assert_eq!(fb.get_pixel(2, 2), Some(&[0, 0, 255, 255]));
+        assert_eq!(fb.get_pixel(4, 4), Some(&[0, 0, 255, 255]));
+        // Interior at offset should be transparent
+        assert_eq!(fb.get_pixel(3, 3), Some(&[0, 0, 0, 0]));
+        // Original position should be transparent
+        assert_eq!(fb.get_pixel(0, 0), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn border_layer_render_clips_outside_target() {
+        let b = BorderLayer::new(3, 3, 5, 5, [255, 0, 0, 255], 1);
+        let mut fb = FrameBuffer::new(4, 4);
+        b.render(&mut fb, (0, 0), 1.0);
+        // Only the top-left corner of the border should be visible
+        assert_eq!(fb.get_pixel(3, 3), Some(&[255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn border_layer_border_width_clamped_to_half() {
+        // border_width > width/2 should be clamped
+        let b = BorderLayer::new(0, 0, 4, 4, [255, 0, 0, 255], 3);
+        let mut fb = FrameBuffer::new(4, 4);
+        b.render(&mut fb, (0, 0), 1.0);
+        // All pixels should be filled (border clamped to 2)
+        for px in fb.pixels() {
+            assert_eq!(*px, [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn border_layer_zero_border_width_is_noop() {
+        let b = BorderLayer::new(0, 0, 5, 5, [255, 0, 0, 255], 0);
+        let mut fb = FrameBuffer::new(5, 5);
+        b.render(&mut fb, (0, 0), 1.0);
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn border_layer_1x1_pixel() {
+        let b = BorderLayer::new(2, 2, 1, 1, [100, 200, 50, 255], 1);
+        let mut fb = FrameBuffer::new(5, 5);
+        b.render(&mut fb, (0, 0), 1.0);
+        assert_eq!(fb.get_pixel(2, 2), Some(&[100, 200, 50, 255]));
+    }
+
+    #[test]
+    fn border_layer_full_width_border() {
+        // border_width == width/2 fills the entire rectangle
+        let b = BorderLayer::new(0, 0, 4, 4, [0, 128, 255, 255], 2);
+        let mut fb = FrameBuffer::new(4, 4);
+        b.render(&mut fb, (0, 0), 1.0);
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 128, 255, 255]);
+        }
+    }
+
+    // ── GradientLayer tests ───────────────────────────────────
+
+    #[test]
+    fn gradient_layer_linear_defaults() {
+        let g = GradientLayer::linear(
+            0, 0, 10, 10,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            0, 0, 10, 10,
+        );
+        assert_eq!(g.x, 0);
+        assert_eq!(g.y, 0);
+        assert_eq!(g.width, 10);
+        assert_eq!(g.height, 10);
+        assert_eq!(g.z_order(), 0);
+        assert_eq!(g.name(), "GradientLayer");
+    }
+
+    #[test]
+    fn gradient_layer_radial_defaults() {
+        let g = GradientLayer::radial(
+            0, 0, 20, 20,
+            [0, 255, 0, 255], [0, 0, 0, 255],
+            10, 10, 10,
+        );
+        assert_eq!(g.width, 20);
+        assert_eq!(g.height, 20);
+        assert!(matches!(g.kind, GradientKind::Radial { .. }));
+    }
+
+    #[test]
+    fn gradient_layer_builders() {
+        let g = GradientLayer::linear(
+            0, 0, 10, 10,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            0, 0, 10, 10,
+        ).with_z(5).with_name("bg-grad");
+        assert_eq!(g.z_order(), 5);
+        assert_eq!(g.name(), "bg-grad");
+    }
+
+    #[test]
+    fn gradient_layer_bounds() {
+        let g = GradientLayer::linear(
+            3, 4, 5, 6,
+            [0, 0, 0, 255], [255, 255, 255, 255],
+            0, 0, 5, 6,
+        );
+        assert_eq!(g.bounds(), Some(Rect::new(3, 4, 5, 6)));
+    }
+
+    #[test]
+    fn gradient_layer_linear_horizontal() {
+        // Horizontal gradient from red (left) to blue (right).
+        let g = GradientLayer::linear(
+            0, 0, 10, 1,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            0, 0, 9, 0,
+        );
+        let mut fb = FrameBuffer::new(10, 1);
+        g.render(&mut fb, (0, 0), 1.0);
+
+        // Leftmost pixel should be red.
+        let left = fb.get_pixel(0, 0).unwrap();
+        assert_eq!(left[0], 255, "left pixel R should be 255");
+        assert_eq!(left[2], 0, "left pixel B should be 0");
+
+        // Rightmost pixel should be blue.
+        let right = fb.get_pixel(9, 0).unwrap();
+        assert!(right[2] > 200, "right pixel B should be > 200, got {}", right[2]);
+
+        // Middle pixel should be a mix.
+        let mid = fb.get_pixel(4, 0).unwrap();
+        assert!(mid[0] > 50 && mid[0] < 200, "mid R = {}", mid[0]);
+        assert!(mid[2] > 50 && mid[2] < 200, "mid B = {}", mid[2]);
+    }
+
+    #[test]
+    fn gradient_layer_linear_vertical() {
+        // Vertical gradient from green (top) to transparent (bottom).
+        let g = GradientLayer::linear(
+            0, 0, 1, 10,
+            [0, 255, 0, 255], [0, 255, 0, 0],
+            0, 0, 0, 9,
+        );
+        let mut fb = FrameBuffer::new(1, 10);
+        g.render(&mut fb, (0, 0), 1.0);
+
+        let top = fb.get_pixel(0, 0).unwrap();
+        assert_eq!(top[1], 255, "top pixel G should be 255");
+        assert_eq!(top[3], 255, "top pixel A should be 255");
+
+        let bottom = fb.get_pixel(0, 9).unwrap();
+        assert!(bottom[3] < 10, "bottom pixel A should be near 0, got {}", bottom[3]);
+    }
+
+    #[test]
+    fn gradient_layer_linear_zero_length_line() {
+        // start == end → t == 0 for all pixels → start colour everywhere.
+        let g = GradientLayer::linear(
+            0, 0, 5, 5,
+            [100, 200, 50, 255], [0, 0, 0, 255],
+            2, 2, 2, 2,
+        );
+        let mut fb = FrameBuffer::new(5, 5);
+        g.render(&mut fb, (0, 0), 1.0);
+        for y in 0..5 {
+            for x in 0..5 {
+                let px = fb.get_pixel(x, y).unwrap();
+                assert_eq!(px[0], 100, "R at ({x},{y}) should be 100");
+                assert_eq!(px[1], 200, "G at ({x},{y}) should be 200");
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_layer_linear_zero_opacity_is_noop() {
+        let g = GradientLayer::linear(
+            0, 0, 5, 5,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            0, 0, 5, 5,
+        );
+        let mut fb = FrameBuffer::new(5, 5);
+        g.render(&mut fb, (0, 0), 0.0);
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0], "zero opacity must not change framebuffer");
+        }
+    }
+
+    #[test]
+    fn gradient_layer_linear_offset_translates() {
+        let g = GradientLayer::linear(
+            0, 0, 3, 1,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            0, 0, 2, 0,
+        );
+        let mut fb = FrameBuffer::new(6, 1);
+        g.render(&mut fb, (3, 0), 1.0);
+        // Pixels 0..3 should still be transparent.
+        assert_eq!(fb.get_pixel(0, 0), Some(&[0, 0, 0, 0]));
+        // Pixel at offset should be rendered.
+        assert!(fb.get_pixel(3, 0).unwrap()[0] > 0, "offset pixel should have red");
+    }
+
+    #[test]
+    fn gradient_layer_linear_clips_outside_framebuffer() {
+        let g = GradientLayer::linear(
+            5, 5, 10, 10,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            0, 0, 10, 10,
+        );
+        let mut fb = FrameBuffer::new(3, 3);
+        g.render(&mut fb, (0, 0), 1.0);
+        // All pixels should remain transparent (gradient is outside).
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn gradient_layer_radial_center_is_start_colour() {
+        // Radial gradient from white center to black edge.
+        let g = GradientLayer::radial(
+            0, 0, 21, 21,
+            [255, 255, 255, 255], [0, 0, 0, 255],
+            10, 10, 10,
+        );
+        let mut fb = FrameBuffer::new(21, 21);
+        g.render(&mut fb, (0, 0), 1.0);
+
+        // Center pixel should be white.
+        let center = fb.get_pixel(10, 10).unwrap();
+        assert_eq!(center[0], 255);
+        assert_eq!(center[1], 255);
+        assert_eq!(center[2], 255);
+    }
+
+    #[test]
+    fn gradient_layer_radial_edge_is_end_colour() {
+        // Radial gradient: at radius distance, colour should be end colour.
+        let g = GradientLayer::radial(
+            0, 0, 21, 1,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            10, 0, 10,
+        );
+        let mut fb = FrameBuffer::new(21, 1);
+        g.render(&mut fb, (0, 0), 1.0);
+
+        // Pixel at (0, 0) is 10px from center → at radius → end colour.
+        let edge = fb.get_pixel(0, 0).unwrap();
+        assert!(edge[2] > 200, "edge pixel B should be > 200, got {}", edge[2]);
+    }
+
+    #[test]
+    fn gradient_layer_radial_beyond_radius_is_end_colour() {
+        // Pixels beyond the radius should clamp to t=1 → end colour.
+        let g = GradientLayer::radial(
+            0, 0, 30, 30,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            15, 15, 5,
+        );
+        let mut fb = FrameBuffer::new(30, 30);
+        g.render(&mut fb, (0, 0), 1.0);
+
+        // Corner pixel (0,0) is ~21px from center, beyond radius=5.
+        let corner = fb.get_pixel(0, 0).unwrap();
+        assert!(corner[2] > 200, "corner B should be > 200, got {}", corner[2]);
+    }
+
+    #[test]
+    fn gradient_layer_radial_zero_radius() {
+        // radius=0 → all t=0 → start colour everywhere.
+        let g = GradientLayer::radial(
+            0, 0, 5, 5,
+            [100, 200, 50, 255], [0, 0, 0, 255],
+            2, 2, 0,
+        );
+        let mut fb = FrameBuffer::new(5, 5);
+        g.render(&mut fb, (0, 0), 1.0);
+        for y in 0..5 {
+            for x in 0..5 {
+                let px = fb.get_pixel(x, y).unwrap();
+                assert_eq!(px[0], 100, "R at ({x},{y}) should be 100");
+                assert_eq!(px[1], 200, "G at ({x},{y}) should be 200");
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_layer_radial_zero_opacity_is_noop() {
+        let g = GradientLayer::radial(
+            0, 0, 5, 5,
+            [255, 0, 0, 255], [0, 0, 255, 255],
+            2, 2, 5,
+        );
+        let mut fb = FrameBuffer::new(5, 5);
+        g.render(&mut fb, (0, 0), 0.0);
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn gradient_layer_interpolate_at_endpoints() {
+        use super::GradientLayer;
+        // t=0 → start colour, t=1 → end colour.
+        let start = [100, 50, 20, 200];
+        let end = [200, 150, 80, 100];
+        assert_eq!(GradientLayer::interpolate(0.0, start, end), start);
+        assert_eq!(GradientLayer::interpolate(1.0, start, end), end);
+        assert_eq!(GradientLayer::interpolate(0.5, start, end), [150, 100, 50, 150]);
+    }
+
+    #[test]
+    fn gradient_kind_debug() {
+        let kind = GradientKind::Linear { start_x: 0, start_y: 0, end_x: 10, end_y: 10 };
+        let s = format!("{kind:?}");
+        assert!(s.contains("Linear"));
+
+        let kind = GradientKind::Radial { center_x: 5, center_y: 5, radius: 10 };
+        let s = format!("{kind:?}");
+        assert!(s.contains("Radial"));
+    }
+
+    #[test]
+    fn gradient_kind_eq() {
+        let a = GradientKind::Linear { start_x: 0, start_y: 0, end_x: 10, end_y: 10 };
+        let b = GradientKind::Linear { start_x: 0, start_y: 0, end_x: 10, end_y: 10 };
+        assert_eq!(a, b);
+
+        let c = GradientKind::Radial { center_x: 5, center_y: 5, radius: 10 };
+        assert_ne!(a, c);
     }
 }
 
