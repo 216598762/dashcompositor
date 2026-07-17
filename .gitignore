@@ -33,6 +33,7 @@ venv/
 coverage/
 .cache/
 .tmp/
+cov.txt
 
 # Rust
 target/
