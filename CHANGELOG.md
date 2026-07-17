@@ -1,3 +1,42 @@
+## 0.12.0 (2026-07-17)
+
+Project rename and breaking env var change. The crate has been
+renamed from `dashcompositor` to `termcompositor` and the tmux
+passthrough env var has been renamed from `DASHPASSTHROUGH` to
+`TMUXPASSTHROUGH`.
+
+### Changed (breaking)
+- **Crate rename**: `dashcompositor` → `termcompositor`. All
+  `use dashcompositor::*` imports must be updated to
+  `use termcompositor::*`. The `[[bin]]` name changed from
+  `dashcompositor` to `termcompositor`.
+- **Env var rename**: `DASHPASSTHROUGH` → `TMUXPASSTHROUGH`.
+  Users who set `DASHPASSTHROUGH=1` in their shell rc must
+  update to `TMUXPASSTHROUGH=1`. The `--tmux-passthrough` CLI
+  flag is unchanged.
+
+### Added
+- 231 unit and integration tests (coverage 89% → 97%).
+- Property-based tests (`proptest`) for `FrameBuffer`,
+  `blend_over`, and `Rect`.
+- `TerminalSize::detect_with_size` closure-based API for
+  testable terminal detection.
+- `FontSource::Bytes` variant for loading fonts from static
+  byte slices.
+- `ImageLayer::from_path` tests using `tempfile`.
+- Sixel streaming multiband iteration test (4×10 frame).
+
+### Fixed
+- Compiler warnings removed (unused imports, useless
+  comparisons, unused `mut`).
+- `cov.txt` and `proptest-regressions/` added to `.gitignore`.
+
+### Documentation
+- `ARCHITECTURE.md`: streaming encode memory model, per-protocol
+  walkthrough, error handling section.
+- `DOCS.md`: encode path selection guide, troubleshooting section.
+- `README.md`: slimmed from ~400 to ~40 lines.
+
 ## 0.11.0 (2026-07-02)
 
 Pre-1.0 infrastructure: MSRV policy, benchmarks, CONTRIBUTING.md.
