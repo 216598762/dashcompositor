@@ -2898,6 +2898,50 @@ mod tests {
         assert!(has_content, "should produce content");
     }
 
+
+    #[test]
+    fn border_layer_corners_not_double_drawn() {
+        // Verify that corners are drawn exactly once, not double-blended.
+        // A border with bw=3 on a 10x10 rect should have each corner pixel
+        // with the same alpha as edge pixels (not double the alpha).
+        let border = BorderLayer::new(0, 0, 10, 10, [255, 0, 0, 200], 3);
+        let mut fb = FrameBuffer::new(10, 10);
+        border.render(&mut fb, (0, 0), 1.0);
+
+        // All border pixels should have the same alpha.
+        // Corner pixel (0, 0)
+        let corner = fb.get_pixel(0, 0).unwrap();
+        // Edge pixel (5, 0) - top edge, not a corner
+        let edge_top = fb.get_pixel(5, 0).unwrap();
+        // Edge pixel (0, 5) - left edge, not a corner
+        let edge_left = fb.get_pixel(0, 5).unwrap();
+        // Interior pixel (5, 5) - should be untouched
+        let interior = fb.get_pixel(5, 5).unwrap();
+
+        // All border pixels should have the same alpha (not double-blended)
+        assert_eq!(corner[3], edge_top[3], "corner and top edge alpha should match");
+        assert_eq!(corner[3], edge_left[3], "corner and left edge alpha should match");
+        // Interior should be untouched (alpha = 0)
+        assert_eq!(interior[3], 0, "interior pixel should be untouched");
+    }
+
+    #[test]
+    fn border_layer_thick_border_rendering() {
+        // Test with border_width > half the smallest dimension.
+        // bw=6 on a 10x10 rect means borders overlap completely (no interior).
+        let border = BorderLayer::new(0, 0, 10, 10, [0, 255, 0, 255], 6);
+        let mut fb = FrameBuffer::new(10, 10);
+        border.render(&mut fb, (0, 0), 1.0);
+
+        // Every pixel should be the border color.
+        for y in 0..10 {
+            for x in 0..10 {
+                let px = fb.get_pixel(x, y).unwrap();
+                assert_eq!(px[1], 255, "pixel ({x},{y}) should be green");
+            }
+        }
+    }
+
     // ── BorderLayer tests ───────────────────────────────────────────────'
 
     #[test]

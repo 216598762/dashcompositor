@@ -12,8 +12,8 @@
 
 use termcompositor::{
     dispatch_to_writer, detect, BorderLayer, CanvasLayer, DropShadow,
-    FrameBuffer, GradientLayer, LayerStack, Protocol, ProtocolEncoder,
-    RectLayer, SolidColor, TextLayer,
+    FrameBuffer, GradientLayer, Layer, LayerStack, Protocol, ProtocolEncoder,
+    RectLayer, SceneGraph, SolidColor, TextLayer,
 };
 
 #[allow(unused_imports)]
@@ -680,5 +680,70 @@ mod border_pipeline {
         assert_eq!(fb.get_pixel(1, 1), Some(&[0, 255, 200, 255]));
         // Interior should be black (background).
         assert_eq!(fb.get_pixel(4, 3), Some(&[0, 0, 0, 255]));
+    }
+}
+// SceneGraph pipeline tests
+
+#[cfg(all(feature = "kitty-encoder", feature = "sixel-encoder"))]
+mod scene_graph_pipeline {
+    use super::*;
+
+    #[test]
+    fn kitty_scene_graph_renders_layers() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((5, 3), 0.8, true);
+        scene.add_child_to(group, RectLayer::new(0, 0, 10, 5, [255, 0, 0, 255]));
+        scene.add_child_to(group, RectLayer::new(11, 0, 10, 5, [0, 255, 0, 255]));
+        let mut fb = FrameBuffer::new(30, 15);
+        scene.render(&mut fb, (0, 0), 1.0);
+        let bytes = Protocol::Kitty.encode(&fb).unwrap();
+        assert!(bytes.starts_with(b"\x1b_G"));
+        assert!(bytes.ends_with(b"\x1b\\"));
+        let px1 = fb.get_pixel(5, 3).unwrap();
+        let px2 = fb.get_pixel(16, 3).unwrap();
+        assert_eq!(px1[0], 255, "first rect R");
+        assert_eq!(px1[1], 0, "first rect G");
+        assert_eq!(px2[1], 255, "second rect G");
+        assert_eq!(px2[0], 0, "second rect R");
+    }
+
+    #[test]
+    fn kitty_scene_graph_hidden_parent_hides_children() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((0, 0), 1.0, false);
+        scene.add_child_to(group, RectLayer::new(0, 0, 10, 10, [255, 0, 0, 255]));
+        let mut fb = FrameBuffer::new(10, 10);
+        scene.render(&mut fb, (0, 0), 1.0);
+        let px = fb.get_pixel(5, 5).unwrap();
+        assert_eq!(px[3], 0, "hidden parent should not render");
+        let bytes = Protocol::Kitty.encode(&fb).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn sixel_scene_graph_renders_layers() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((3, 2), 1.0, true);
+        scene.add_child_to(group, RectLayer::new(0, 0, 8, 4, [0, 0, 255, 255]));
+        let mut fb = FrameBuffer::new(20, 10);
+        scene.render(&mut fb, (0, 0), 1.0);
+        let bytes = Protocol::Sixel.encode(&fb).unwrap();
+        assert!(!bytes.is_empty());
+        let px = fb.get_pixel(3, 2).unwrap();
+        assert_eq!(px[2], 255, "rect should be blue");
+    }
+
+    #[test]
+    fn sixel_scene_graph_opacity_cascades() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((0, 0), 0.5, true);
+        scene.add_child_to(group, SolidColor::new(255, 0, 0, 255).with_z(0));
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 1.0);
+        let bytes = Protocol::Sixel.encode(&fb).unwrap();
+        assert!(!bytes.is_empty());
+        let px = fb.get_pixel(2, 2).unwrap();
+        let alpha = px[3] as i32;
+        assert!(alpha >= 126 && alpha <= 130, "alpha was {}", alpha);
     }
 }
