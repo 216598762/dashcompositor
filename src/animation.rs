@@ -201,8 +201,7 @@ impl Default for AnimConfig {
 /// rendering; without it, frames are skipped.
 ///
 /// This function never returns under normal operation. To exit,
-/// call [`AnimContext::exit`] from within the callback, or press
-/// Ctrl+C.
+/// call [`AnimContext::exit`] from within the callback.
 ///
 /// # Example
 ///
