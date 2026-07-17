@@ -24,8 +24,8 @@
 //! inside tmux, the Kitty arm wraps its APC output in a tmux
 //! passthrough DCS (ESC P tmux ; ... ESC \\) so the bytes
 //! survive the tmux -> outer-terminal hop. The opt-in env
-//! var is `DASHPASSTHROUGH` (any non-empty value, typically
-//! `DASHPASSTHROUGH=1`). The flag sets that env var
+//! var is `TMUXPASSTHROUGH` (any non-empty value, typically
+//! `TMUXPASSTHROUGH=1`). The flag sets that env var
 //! before calling `detect` / `dispatch`, so the resulting
 //! protocol + wrapping decision matches the one a user would
 //! get by exporting the var themselves.
@@ -77,33 +77,33 @@ fn parse_tmux_passthrough_flag_from(args: &[String]) -> bool {
     args.iter().any(|a| a == "--tmux-passthrough")
 }
 
-/// RAII guard for the `DASHPASSTHROUGH` env var set by
+/// RAII guard for the `TMUXPASSTHROUGH` env var set by
 /// `--tmux-passthrough`. Saves the current value on
 /// construction and restores it on `Drop`. Uses
 /// `std::env::set_var` / `std::env::remove_var` (the v0.7.1
 /// `with_env` test-helper pattern is parallel but lives
 /// inside the test module -- this is a single-env-var
 /// ad-hoc version for `main`).
-struct DashPassthroughGuard {
+struct TmuxPassthroughGuard {
     saved: Option<String>,
 }
 
-impl DashPassthroughGuard {
+impl TmuxPassthroughGuard {
     fn set(value: Option<&str>) -> Self {
-        let saved = std::env::var("DASHPASSTHROUGH").ok();
+        let saved = std::env::var("TMUXPASSTHROUGH").ok();
         match value {
-            Some(v) => std::env::set_var("DASHPASSTHROUGH", v),
-            None => std::env::remove_var("DASHPASSTHROUGH"),
+            Some(v) => std::env::set_var("TMUXPASSTHROUGH", v),
+            None => std::env::remove_var("TMUXPASSTHROUGH"),
         }
         Self { saved }
     }
 }
 
-impl Drop for DashPassthroughGuard {
+impl Drop for TmuxPassthroughGuard {
     fn drop(&mut self) {
         match self.saved.as_ref() {
-            Some(v) => std::env::set_var("DASHPASSTHROUGH", v),
-            None => std::env::remove_var("DASHPASSTHROUGH"),
+            Some(v) => std::env::set_var("TMUXPASSTHROUGH", v),
+            None => std::env::remove_var("TMUXPASSTHROUGH"),
         }
     }
 }/// Build the demo layer stack with background, centered rect,
@@ -154,16 +154,16 @@ host terminal = {cols} cols x {rows} rows",
     );
 
     // v0.8.0 tmux passthrough: parse the flag FIRST so the
-    // `DASHPASSTHROUGH` env var is set for the rest of
+    // `TMUXPASSTHROUGH` env var is set for the rest of
     // `main` (including the `detect` / `detect_with_probe`
     // calls below). The guard restores the previous value
     // on `Drop` (i.e. on exit), so a shell that has
-    // `DASHPASSTHROUGH=1` exported in its rc is unaffected.
+    // `TMUXPASSTHROUGH=1` exported in its rc is unaffected.
     //
     // IMPORTANT: only create the guard when the flag IS
     // set. If we always create the guard, the
-    // `DashPassthroughGuard::set(None)` call would REMOVE
-    // the user's `DASHPASSTHROUGH` env var (replacing it
+    // `TmuxPassthroughGuard::set(None)` call would REMOVE
+    // the user's `TMUXPASSTHROUGH` env var (replacing it
     // with nothing), which would silently disable the
     // passthrough for a user who exported the var in
     // their shell rc but didn't pass `--tmux-passthrough`.
@@ -171,7 +171,7 @@ host terminal = {cols} cols x {rows} rows",
     // the user's existing env is respected as-is.
     let tmux_passthrough = parse_tmux_passthrough_flag_from(&args);
     let _passthrough_guard = if tmux_passthrough {
-        Some(DashPassthroughGuard::set(Some("1")))
+        Some(TmuxPassthroughGuard::set(Some("1")))
     } else {
         None
     };
@@ -238,9 +238,9 @@ using the env-var shim instead"
     eprintln!(
         "tmux passthrough: {}",
         if tmux_passthrough {
-            "enabled (DASHPASSTHROUGH=1)"
+            "enabled (TMUXPASSTHROUGH=1)"
         } else {
-            "disabled (set --tmux-passthrough or DASHPASSTHROUGH=1 to opt in)"
+            "disabled (set --tmux-passthrough or TMUXPASSTHROUGH=1 to opt in)"
         },
     );
 
@@ -430,90 +430,90 @@ mod tests {
         assert_eq!(stack.entries()[2].opacity(), 0.9);
     }
 
-    // ── DashPassthroughGuard ──────────────────────────────────
+    // ── TmuxPassthroughGuard ──────────────────────────────────
 
-    /// Helper: ensure the DASHPASSTHROUGH env var is absent before
-    /// and after the test. DashPassthroughGuard::drop handles the
+    /// Helper: ensure the TMUXPASSTHROUGH env var is absent before
+    /// and after the test. TmuxPassthroughGuard::drop handles the
     /// "after" part for the guard's own saved state.
-    fn ensure_dashpassthrough_absent() {
-        let _ = std::env::remove_var("DASHPASSTHROUGH");
+    fn ensure_tmuxpassthrough_absent() {
+        let _ = std::env::remove_var("TMUXPASSTHROUGH");
     }
 
     #[test]
     fn guard_set_some_sets_env_var() {
-        ensure_dashpassthrough_absent();
+        ensure_tmuxpassthrough_absent();
         {
-            let _guard = DashPassthroughGuard::set(Some("1"));
-            assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "1");
+            let _guard = TmuxPassthroughGuard::set(Some("1"));
+            assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "1");
         }
         // Guard dropped — env var should be removed (was absent before).
-        assert!(std::env::var("DASHPASSTHROUGH").is_err());
+        assert!(std::env::var("TMUXPASSTHROUGH").is_err());
     }
 
     #[test]
     fn guard_set_none_removes_env_var() {
-        ensure_dashpassthrough_absent();
+        ensure_tmuxpassthrough_absent();
         // Pre-set the var so we can verify set(None) removes it.
-        std::env::set_var("DASHPASSTHROUGH", "existing");
+        std::env::set_var("TMUXPASSTHROUGH", "existing");
         {
-            let _guard = DashPassthroughGuard::set(None);
-            assert!(std::env::var("DASHPASSTHROUGH").is_err());
+            let _guard = TmuxPassthroughGuard::set(None);
+            assert!(std::env::var("TMUXPASSTHROUGH").is_err());
         }
         // Guard dropped — should restore the original value.
-        assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "existing");
+        assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "existing");
     }
 
     #[test]
     fn guard_set_some_restores_previous_value() {
-        ensure_dashpassthrough_absent();
-        std::env::set_var("DASHPASSTHROUGH", "old");
+        ensure_tmuxpassthrough_absent();
+        std::env::set_var("TMUXPASSTHROUGH", "old");
         {
-            let _guard = DashPassthroughGuard::set(Some("new"));
-            assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "new");
+            let _guard = TmuxPassthroughGuard::set(Some("new"));
+            assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "new");
         }
         // Guard dropped — should restore "old".
-        assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "old");
-        let _ = std::env::remove_var("DASHPASSTHROUGH");
+        assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "old");
+        let _ = std::env::remove_var("TMUXPASSTHROUGH");
     }
 
     #[test]
     fn guard_drop_removes_var_when_absent_before() {
-        ensure_dashpassthrough_absent();
+        ensure_tmuxpassthrough_absent();
         {
-            let _guard = DashPassthroughGuard::set(Some("1"));
-            assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "1");
+            let _guard = TmuxPassthroughGuard::set(Some("1"));
+            assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "1");
         }
         // Guard dropped — should remove the var entirely.
-        assert!(std::env::var("DASHPASSTHROUGH").is_err());
+        assert!(std::env::var("TMUXPASSTHROUGH").is_err());
     }
 
     #[test]
     fn guard_nested_guards_restore_correctly() {
-        ensure_dashpassthrough_absent();
-        std::env::set_var("DASHPASSTHROUGH", "original");
+        ensure_tmuxpassthrough_absent();
+        std::env::set_var("TMUXPASSTHROUGH", "original");
         {
-            let _outer = DashPassthroughGuard::set(Some("outer"));
-            assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "outer");
+            let _outer = TmuxPassthroughGuard::set(Some("outer"));
+            assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "outer");
             {
-                let _inner = DashPassthroughGuard::set(Some("inner"));
-                assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "inner");
+                let _inner = TmuxPassthroughGuard::set(Some("inner"));
+                assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "inner");
             }
             // Inner guard dropped — should restore "outer".
-            assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "outer");
+            assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "outer");
         }
         // Outer guard dropped — should restore "original".
-        assert_eq!(std::env::var("DASHPASSTHROUGH").unwrap(), "original");
-        let _ = std::env::remove_var("DASHPASSTHROUGH");
+        assert_eq!(std::env::var("TMUXPASSTHROUGH").unwrap(), "original");
+        let _ = std::env::remove_var("TMUXPASSTHROUGH");
     }
 
     #[test]
     fn guard_set_none_when_absent_leaves_absent() {
-        ensure_dashpassthrough_absent();
+        ensure_tmuxpassthrough_absent();
         {
-            let _guard = DashPassthroughGuard::set(None);
-            assert!(std::env::var("DASHPASSTHROUGH").is_err());
+            let _guard = TmuxPassthroughGuard::set(None);
+            assert!(std::env::var("TMUXPASSTHROUGH").is_err());
         }
         // Guard dropped — was absent before, should remain absent.
-        assert!(std::env::var("DASHPASSTHROUGH").is_err());
+        assert!(std::env::var("TMUXPASSTHROUGH").is_err());
     }
 }

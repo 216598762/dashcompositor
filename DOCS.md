@@ -282,7 +282,7 @@ Enable at least one encoder feature to produce terminal output. With neither, `d
 Priority order:
 
 1. **`TERM_PROGRAM`** (set by the terminal app): `kitty`, `wezterm`, `ghostty` → `Protocol::Kitty`.
-2. **`TERM`**: `xterm-kitty`, `foot`, `foot-*` → `Protocol::Kitty`; `tmux`, `tmux-*` → `Protocol::Sixel` (or `Protocol::Kitty` when `DASHPASSTHROUGH` is set).
+2. **`TERM`**: `xterm-kitty`, `foot`, `foot-*` → `Protocol::Kitty`; `tmux`, `tmux-*` → `Protocol::Sixel` (or `Protocol::Kitty` when `TMUXPASSTHROUGH` is set).
 3. **`COLORTERM`**: `truecolor` / `24bit` → `Protocol::Kitty` when TERM is inconclusive.
 4. **Default**: `Protocol::Sixel`.
 
@@ -430,14 +430,14 @@ When the host is running inside tmux, the Kitty graphics protocol's APC payload 
 Enable with:
 
 ```bash
-export DASHPASSTHROUGH=1
+export TMUXPASSTHROUGH=1
 termcompositor
 ```
 
 Or per-invocation:
 
 ```bash
-DASHPASSTHROUGH=1 termcompositor
+TMUXPASSTHROUGH=1 termcompositor
 ```
 
 Or via the CLI flag:
@@ -450,7 +450,7 @@ termcompositor --tmux-passthrough
 - tmux 3.2+ (released 2021).
 - `set -g allow-passthrough on` in `~/.tmux.conf`.
 
-Both the `DASHPASSTHROUGH` env var and the `TMUX` env var must be set for the wrapping to apply. This prevents double-wrapping on non-tmux hosts.
+Both the `TMUXPASSTHROUGH` env var and the `TMUX` env var must be set for the wrapping to apply. This prevents double-wrapping on non-tmux hosts.
 
 Programmatic usage:
 
@@ -506,8 +506,8 @@ users, enable **both**.
    `echo $TERM_PROGRAM`. If you're on a plain xterm, it likely only supports
    Sixel. Build with `sixel-encoder` and use `Protocol::Sixel` or
    `Protocol::Auto`.
-4. If you're inside tmux without `DASHPASSTHROUGH`, the default protocol is
-   Sixel. Build with `sixel-encoder` or set `DASHPASSTHROUGH=1` (see
+4. If you're inside tmux without `TMUXPASSTHROUGH`, the default protocol is
+   Sixel. Build with `sixel-encoder` or set `TMUXPASSTHROUGH=1` (see
    [Tmux passthrough](#tmux-passthrough)).
 
 ### "Invalid dimensions" error
@@ -533,10 +533,10 @@ If you're using `TerminalSize::detect()`, handle the `None` case or use
 Kitty APC wrapping, or nothing appears.
 
 **Checklist**:
-1. **Is `DASHPASSTHROUGH` set?** The env var is the opt-in. Run
-   `echo $DASHPASSTHROUGH`. If empty, set it:
+1. **Is `TMUXPASSTHROUGH` set?** The env var is the opt-in. Run
+   `echo $TMUXPASSTHROUGH`. If empty, set it:
    ```bash
-   export DASHPASSTHROUGH=1
+   export TMUXPASSTHROUGH=1
    ```
 2. **Are you inside tmux?** The `TMUX` env var must be set (tmux sets it
    automatically). Run `echo $TMUX`. If empty, you are not in a tmux session.
@@ -548,7 +548,7 @@ Kitty APC wrapping, or nothing appears.
    ```
    Then restart tmux or run `tmux kill-server` and reconnect.
 5. **Is the `kitty-encoder` feature enabled?** The tmux passthrough wrapping
-   only applies to Kitty output. Both `DASHPASSTHROUGH` and `kitty-encoder`
+   only applies to Kitty output. Both `TMUXPASSTHROUGH` and `kitty-encoder`
    must be present.
 
 ### Text renders as solid coloured blocks
@@ -600,7 +600,7 @@ echo "COLORTERM=$COLORTERM"
 `detect()` uses a fixed priority:
 1. `TERM_PROGRAM` wins: `kitty`, `wezterm`, `ghostty` → `Protocol::Kitty`
 2. `TERM`: `xterm-kitty`, `foot`, `foot-*` → `Kitty`; `tmux`, `tmux-*` →
-   `Sixel` (or `Kitty` when `DASHPASSTHROUGH` is set)
+   `Sixel` (or `Kitty` when `TMUXPASSTHROUGH` is set)
 3. `COLORTERM` tiebreaker: `truecolor` / `24bit` → `Kitty` when the above are
    inconclusive
 4. Default: `Sixel`

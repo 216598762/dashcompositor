@@ -18,7 +18,7 @@
 //! behind the `sixel-encoder` Cargo feature. v0.7.0 adds the
 //! auto-detect shim and the [`Protocol::Auto`] variant. v0.8.0
 //! adds tmux passthrough: when the host is running inside
-//! tmux and the user has opted in via the `DASHPASSTHROUGH`
+//! tmux and the user has opted in via the `TMUXPASSTHROUGH`
 //! env var (or the `main.rs` `--tmux-passthrough` CLI flag),
 //! the Kitty arm wraps its APC output in a tmux passthrough
 //! DCS (`\x1bPtmux;...\x1b\\`) so the bytes survive the
@@ -178,7 +178,7 @@ impl From<icy_sixel::SixelError> for EncoderError {
 /// 2. `TERM` (terminfo name): `xterm-kitty` / `foot` / `foot-*`
 ///    -> `Protocol::Kitty`; `tmux` / `tmux-*` ->
 ///    `Protocol::Sixel` by default, or `Protocol::Kitty`
-///    when the `DASHPASSTHROUGH` env var is set
+///    when the `TMUXPASSTHROUGH` env var is set
 ///    (v0.8.0 tmux passthrough opt-in -- the dispatch
 ///    then wraps the output in `\x1bPtmux;...\x1b\\`).
 /// 3. `COLORTERM` tiebreaker (weak signal): `truecolor` /
@@ -192,7 +192,7 @@ pub fn detect() -> Protocol {
         std::env::var("TERM").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),
         std::env::var("COLORTERM").ok().as_deref(),
-        std::env::var("DASHPASSTHROUGH").ok().as_deref(),
+        std::env::var("TMUXPASSTHROUGH").ok().as_deref(),
     )
 }
 
@@ -263,8 +263,8 @@ pub(crate) fn detect_with_env(
             return Protocol::Kitty;
         }
         // v0.8.0 tmux passthrough: if the user has opted in
-        // via the `DASHPASSTHROUGH` env var (typically
-        // `DASHPASSTHROUGH=1`), we trust that they have
+        // via the `TMUXPASSTHROUGH` env var (typically
+        // `TMUXPASSTHROUGH=1`), we trust that they have
         // `set -g allow-passthrough on` in their tmux.conf
         // and pick Kitty -- the dispatch will auto-wrap the
         // output in `\x1bPtmux;...\x1b\\` (see
@@ -327,9 +327,9 @@ pub trait ProtocolEncoder {
 /// module only, not its descendants).
 #[cfg(feature = "kitty-encoder")]
 pub(crate) fn tmux_passthrough_enabled() -> bool {
-    // `DASHPASSTHROUGH` is the v0.8.0 opt-in: any non-empty
+    // `TMUXPASSTHROUGH` is the v0.8.0 opt-in: any non-empty
     // value enables passthrough. Typical usage is
-    // `DASHPASSTHROUGH=1`. The env var is also set by
+    // `TMUXPASSTHROUGH=1`. The env var is also set by
     // `main.rs`'s `--tmux-passthrough` CLI flag.
     //
     // `TMUX` is the canonical signal that we are actually
@@ -340,9 +340,9 @@ pub(crate) fn tmux_passthrough_enabled() -> bool {
     // and presumably has `set -g allow-passthrough on` in
     // their tmux.conf) AND the `TMUX` env var (so we don't
     // accidentally double-wrap a Kitty sequence for a
-    // non-tmux host that happens to have `DASHPASSTHROUGH`
+    // non-tmux host that happens to have `TMUXPASSTHROUGH`
     // set in its shell rc).
-    std::env::var("DASHPASSTHROUGH").is_ok_and(|v| !v.is_empty())
+    std::env::var("TMUXPASSTHROUGH").is_ok_and(|v| !v.is_empty())
         && std::env::var_os("TMUX").is_some()
 }
 
@@ -357,7 +357,7 @@ fn dispatch(protocol: Protocol, frame: &FrameBuffer) -> Result<Vec<u8>, EncoderE
         Protocol::Kitty => {
             // v0.8.0 tmux passthrough: when the host is
             // running inside tmux AND the user has opted in
-            // via `DASHPASSTHROUGH=1` (or `--tmux-passthrough`),
+            // via `TMUXPASSTHROUGH=1` (or `--tmux-passthrough`),
             // wrap the raw Kitty APC bytes in
             // `\x1bPtmux;...\x1b\\` so they survive the
             // tmux→outer-terminal hop. The opt-in is checked
@@ -426,7 +426,7 @@ impl ProtocolEncoder for Protocol {
 /// For [`Protocol::Kitty`]: delegates to
 /// [`kitty::encode_passthrough_to_writer`] (which handles
 /// the optional tmux passthrough wrap when the
-/// `DASHPASSTHROUGH` opt-in is set; otherwise equivalent
+/// `TMUXPASSTHROUGH` opt-in is set; otherwise equivalent
 /// to [`kitty::encode_to_writer`]).
 ///
 /// For [`Protocol::Sixel`]: delegates to
@@ -809,7 +809,7 @@ mod kitty {
     /// because the user must opt in to
     /// `set -g allow-passthrough on` in their tmux.conf for
     /// tmux 3.2+ to forward APC payloads. Pure: no I/O, no
-    /// env-var reads. The `DASHPASSTHROUGH=1` opt-in is
+    /// env-var reads. The `TMUXPASSTHROUGH=1` opt-in is
     /// checked by the caller (`dispatch`).
     ///
     /// Inner `\x1b` bytes are DOUBLED so tmux 3.2+ passes
@@ -944,7 +944,7 @@ mod kitty {
     /// O(1) memory.
     ///
     /// When `tmux_passthrough_enabled()` is `false` (the
-    /// default: the user has NOT set `DASHPASSTHROUGH=1`
+    /// default: the user has NOT set `TMUXPASSTHROUGH=1`
     /// and the `TMUX` env var is not set), this function
     /// is equivalent to [`encode_to_writer`] -- no
     /// wrapping is applied. When `true`, the encoded APC
@@ -965,7 +965,7 @@ mod kitty {
     ///     per write call (~4KB scratch), regardless of
     ///     framebuffer size.
     ///
-    /// The `DASHPASSTHROUGH` opt-in is checked here (not
+    /// The `TMUXPASSTHROUGH` opt-in is checked here (not
     /// in `detect`) for the same reason it is in
     /// `dispatch`: a user with a known-good tmux + Kitty
     /// setup who wants to force the wrap regardless of
@@ -1776,7 +1776,7 @@ mod tests {
 
     /// Panic-safe, race-free env-var fixture. Acquires the
     /// process-global env mutex, sets TERM / TERM_PROGRAM /
-    /// COLORTERM / DASHPASSTHROUGH to the supplied values
+    /// COLORTERM / TMUXPASSTHROUGH to the supplied values
     /// (or removes them if `None`) AND clears `TMUX` to
     /// a known unset state, runs the closure, then restores
     /// all five env vars via the `EnvGuard` `Drop` impls
@@ -1792,7 +1792,7 @@ mod tests {
         term: Option<&str>,
         term_program: Option<&str>,
         colorterm: Option<&str>,
-        dash_passthrough: Option<&str>,
+        tmux_passthrough: Option<&str>,
         f: F,
     ) -> R {
         let _lock = env_lock();
@@ -1802,12 +1802,12 @@ mod tests {
         _program.set(term_program);
         let _colorterm = EnvGuard::new("COLORTERM");
         _colorterm.set(colorterm);
-        let _dash = EnvGuard::new("DASHPASSTHROUGH");
-        _dash.set(dash_passthrough);
+        let _tmux = EnvGuard::new("TMUXPASSTHROUGH");
+        _tmux.set(tmux_passthrough);
         let _tmux = EnvGuard::new("TMUX");
         _tmux.set(None);
         f()
-        // _tmux, _dash, _colorterm, _program, _term, _lock
+        // _tmux, _tmux, _colorterm, _program, _term, _lock
         // drop in reverse order, restoring all five env
         // vars then releasing the mutex.
     }
@@ -1954,9 +1954,9 @@ mod tests {
         // v0.8.0: use `with_env(None, None, None, None, ...)`
         // to acquire the env mutex and clear all four
         // touchable env vars (TERM, TERM_PROGRAM, COLORTERM,
-        // DASHPASSTHROUGH) AND `TMUX`. This ensures the
+        // TMUXPASSTHROUGH) AND `TMUX`. This ensures the
         // v0.8.0 auto-wrap in `dispatch(Protocol::Kitty, ...)`
-        // does NOT kick in (it requires `DASHPASSTHROUGH` and
+        // does NOT kick in (it requires `TMUXPASSTHROUGH` and
         // `TMUX` to both be set), so the test always sees
         // the raw APC framing (`\x1b_G ... \x1b\\`). Using
         // `with_env` (not manual `EnvGuard`s) is critical:
@@ -1965,7 +1965,7 @@ mod tests {
         // parallel-test race that a previous attempt with
         // manual `EnvGuard`s failed to close (the manual
         // guards don't acquire the mutex, so a parallel
-        // `with_env` test could modify `DASHPASSTHROUGH` or
+        // `with_env` test could modify `TMUXPASSTHROUGH` or
         // `TMUX` between the guard creation and the encode
         // call).
         with_env(None, None, None, None, || {
@@ -1999,7 +1999,7 @@ mod tests {
         // for why `with_env` (not manual `EnvGuard`s) is
         // required: the manual guards don't acquire the
         // mutex, so a parallel `with_env` test could
-        // modify `DASHPASSTHROUGH` or `TMUX` between the
+        // modify `TMUXPASSTHROUGH` or `TMUX` between the
         // two `encode` calls, causing the first to wrap
         // and the second to not wrap (or vice versa),
         // breaking the determinism assertion.
@@ -2107,8 +2107,8 @@ mod tests {
     // any process state).
 
     #[test]
-    fn detect_with_env_tmux_picks_kitty_with_dash_passthrough() {
-        // v0.8.0: when the user opts in via DASHPASSTHROUGH
+    fn detect_with_env_tmux_picks_kitty_with_tmux_passthrough() {
+        // v0.8.0: when the user opts in via TMUXPASSTHROUGH
         // (any non-empty value) AND TERM=tmux*, the heuristic
         // picks Kitty (the dispatch will then auto-wrap).
         assert_eq!(
@@ -2133,8 +2133,8 @@ mod tests {
     }
 
     #[test]
-    fn detect_with_env_tmux_picks_sixel_with_empty_or_missing_dash_passthrough() {
-        // The opt-in is required: empty or absent DASHPASSTHROUGH
+    fn detect_with_env_tmux_picks_sixel_with_empty_or_missing_tmux_passthrough() {
+        // The opt-in is required: empty or absent TMUXPASSTHROUGH
         // keeps the v0.7.0 Sixel fallback.
         assert_eq!(
             detect_with_env(Some("tmux-256color"), None, None, None),
@@ -2147,7 +2147,7 @@ mod tests {
         // The opt-in check is `is_some_and(|v| !v.is_empty())`:
         // any non-empty value (including `"0"`, `"false"`, etc.)
         // enables the opt-in. This is intentional: a user who
-        // explicitly sets `DASHPASSTHROUGH=0` in their shell
+        // explicitly sets `TMUXPASSTHROUGH=0` in their shell
         // is making a conscious decision, and the simplest
         // interpretation is "I have set the variable, so my
         // intent is to opt in". A user who wants to opt out
@@ -2246,8 +2246,8 @@ mod tests {
 
     #[cfg(feature = "kitty-encoder")]
     #[test]
-    fn dispatch_kitty_with_dash_passthrough_wraps_output() {
-        // When kitty-encoder is on AND DASHPASSTHROUGH is
+    fn dispatch_kitty_with_tmux_passthrough_wraps_output() {
+        // When kitty-encoder is on AND TMUXPASSTHROUGH is
         // set AND the host is inside tmux (TMUX env var
         // present), the dispatch should wrap the Kitty
         // APC output in the tmux passthrough DCS. The
@@ -2255,7 +2255,7 @@ mod tests {
         with_env(Some("tmux-256color"), None, None, Some("1"), || {
             // TMUX must also be set for the auto-wrap to
             // kick in (the `tmux_passthrough_enabled` check
-            // requires BOTH DASHPASSTHROUGH and TMUX).
+            // requires BOTH TMUXPASSTHROUGH and TMUX).
             let _tmux = EnvGuard::new("TMUX");
             _tmux.set(Some("/tmp/tmux-1000/default,12345,0"));
             let fb = FrameBuffer::new(2, 2);
@@ -2266,7 +2266,7 @@ mod tests {
             // (but as `\x1b\x1b_G` because ESC was doubled).
             assert!(
                 bytes.starts_with(b"\x1bPtmux;"),
-                "Kitty dispatch with DASHPASSTHROUGH+TMUX must wrap; got prefix: {:?}",
+                "Kitty dispatch with TMUXPASSTHROUGH+TMUX must wrap; got prefix: {:?}",
                 &bytes[..bytes.len().min(12)],
             );
             assert!(bytes.ends_with(b"\x1b\\"));
@@ -2275,8 +2275,8 @@ mod tests {
 
     #[cfg(feature = "kitty-encoder")]
     #[test]
-    fn dispatch_kitty_without_dash_passthrough_does_not_wrap() {
-        // When DASHPASSTHROUGH is not set, the dispatch
+    fn dispatch_kitty_without_tmux_passthrough_does_not_wrap() {
+        // When TMUXPASSTHROUGH is not set, the dispatch
         // produces raw Kitty APC bytes (no wrapping),
         // even if the user is inside tmux. This is the
         // v0.7.0 backwards-compat default.
@@ -2289,7 +2289,7 @@ mod tests {
             // `\x1bPtmux;`).
             assert!(
                 bytes.starts_with(b"\x1b_G"),
-                "Kitty dispatch without DASHPASSTHROUGH must NOT wrap; got prefix: {:?}",
+                "Kitty dispatch without TMUXPASSTHROUGH must NOT wrap; got prefix: {:?}",
                 &bytes[..bytes.len().min(12)],
             );
             assert!(!bytes.starts_with(b"\x1bPtmux;"));
@@ -2314,7 +2314,7 @@ mod tests {
             let bytes = dispatch(Protocol::Kitty, &fb).unwrap();
             assert!(
                 bytes.starts_with(b"\x1bPtmux;"),
-                "Explicit Protocol::Kitty with DASHPASSTHROUGH+TMUX must wrap; got prefix: {:?}",
+                "Explicit Protocol::Kitty with TMUXPASSTHROUGH+TMUX must wrap; got prefix: {:?}",
                 &bytes[..bytes.len().min(12)],
             );
         });
@@ -3115,7 +3115,7 @@ mod tests {
     }
 
     /// End-to-end: when the tmux passthrough opt-in IS
-    /// set (DASHPASSTHROUGH + TMUX), the output must be
+    /// set (TMUXPASSTHROUGH + TMUX), the output must be
     /// the wrapped DCS. This verifies the v0.8.3
     /// end-to-end O(1) streaming path: encode + wrap
     /// + emit in a single pass.
@@ -3382,15 +3382,15 @@ mod tests {
     #[test]
     fn tmux_passthrough_requires_both_env_vars() {
         let _lock = env_lock();
-        let _g1 = EnvGuard::new("DASHPASSTHROUGH");
+        let _g1 = EnvGuard::new("TMUXPASSTHROUGH");
         let _g2 = EnvGuard::new("TMUX");
 
         // Neither set
-        std::env::remove_var("DASHPASSTHROUGH");
+        std::env::remove_var("TMUXPASSTHROUGH");
         std::env::remove_var("TMUX");
         assert!(!super::tmux_passthrough_enabled());
 
-        // Only DASHPASSTHROUGH set
+        // Only TMUXPASSTHROUGH set
         _g1.set(Some("1"));
         assert!(!super::tmux_passthrough_enabled());
 
@@ -3403,7 +3403,7 @@ mod tests {
         _g1.set(Some("1"));
         assert!(super::tmux_passthrough_enabled());
 
-        // Empty DASHPASSTHROUGH should NOT enable
+        // Empty TMUXPASSTHROUGH should NOT enable
         _g1.set(Some(""));
         assert!(!super::tmux_passthrough_enabled());
     }
@@ -3506,7 +3506,7 @@ mod tests {
     #[test]
     fn kitty_encode_passthrough_to_writer_no_tmux_matches_encode_to_writer() {
         let _lock = env_lock();
-        let _g1 = EnvGuard::new("DASHPASSTHROUGH");
+        let _g1 = EnvGuard::new("TMUXPASSTHROUGH");
         let _g2 = EnvGuard::new("TMUX");
         _g1.set(None);
         _g2.set(None);

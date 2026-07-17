@@ -356,7 +356,7 @@ mod tmux_passthrough {
             *px = [100, 200, 50, 255];
         }
 
-        // Without DASHPASSTHROUGH env var, encode_passthrough_to_writer
+        // Without TMUXPASSTHROUGH env var, encode_passthrough_to_writer
         // should produce the same output as raw Kitty encode.
         let raw = Protocol::Kitty.encode(&fb).unwrap();
 
@@ -365,7 +365,7 @@ mod tmux_passthrough {
 
         assert_eq!(
             auto_out, raw,
-            "without DASHPASSTHROUGH, passthrough must be identity"
+            "without TMUXPASSTHROUGH, passthrough must be identity"
         );
     }
 

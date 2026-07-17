@@ -292,7 +292,7 @@ Memory behaviour depends on the resolved protocol:
 `detect()` uses the following heuristic priority:
 
 1. **`TERM_PROGRAM`** (most specific): `kitty`, `wezterm`, `ghostty` → Kitty.
-2. **`TERM`**: `xterm-kitty`, `foot`, `foot-*` → Kitty; `tmux`, `tmux-*` → Sixel (or Kitty when `DASHPASSTHROUGH` is set).
+2. **`TERM`**: `xterm-kitty`, `foot`, `foot-*` → Kitty; `tmux`, `tmux-*` → Sixel (or Kitty when `TMUXPASSTHROUGH` is set).
 3. **`COLORTERM`** tiebreaker: `truecolor` / `24bit` → Kitty when TERM is inconclusive.
 4. **Default**: Sixel (most universal fallback).
 
@@ -300,7 +300,7 @@ Memory behaviour depends on the resolved protocol:
 
 ### Tmux passthrough
 
-When the host is inside tmux, set `DASHPASSTHROUGH=1` to wrap Kitty APC output in a tmux passthrough DCS (`ESC P tmux ; ... ESC \`). Requires `set -g allow-passthrough on` in `~/.tmux.conf` (tmux 3.2+).
+When the host is inside tmux, set `TMUXPASSTHROUGH=1` to wrap Kitty APC output in a tmux passthrough DCS (`ESC P tmux ; ... ESC \`). Requires `set -g allow-passthrough on` in `~/.tmux.conf` (tmux 3.2+).
 
 ```rust
 use termcompositor::wrap_for_tmux;
