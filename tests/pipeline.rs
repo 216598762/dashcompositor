@@ -11,7 +11,7 @@
 //! - `encode_passthrough_to_writer()`
 
 use termcompositor::{
-    dispatch_to_writer, detect, CanvasLayer, FrameBuffer, LayerStack, Protocol, ProtocolEncoder, RectLayer,
+    dispatch_to_writer, detect, CanvasLayer, DropShadow, FrameBuffer, LayerStack, Protocol, ProtocolEncoder, RectLayer,
     SolidColor, TextLayer,
 };
 
@@ -478,5 +478,58 @@ mod canvas_pipeline {
         assert!(!bytes.is_empty(), "Sixel canvas output must not be empty");
         // Diagonal pixel at canvas-local (1,1) -> fb (3,3) should be green.
         assert_eq!(fb.get_pixel(3, 3), Some(&[0, 255, 0, 255]));
+    }
+}
+
+// -- DropShadow pipeline tests ----------------------------------
+
+#[cfg(all(feature = "kitty-encoder", feature = "sixel-encoder"))]
+mod shadow_pipeline {
+    use super::*;
+
+    #[test]
+    fn kitty_drop_shadow_pipeline() {
+        let inner = RectLayer::new(5, 5, 5, 5, [255, 255, 255, 255]);
+        let shadow = DropShadow::new(Box::new(inner))
+            .with_offset(2, 2)
+            .with_blur(1)
+            .with_shadow_color([0, 0, 0, 200])
+            .with_z(5);
+        let mut stack = LayerStack::new();
+        stack.push(SolidColor::new(0, 0, 0, 255).with_z(0));
+        stack.push(shadow);
+
+        let mut fb = FrameBuffer::new(20, 20);
+        stack.render(&mut fb);
+
+        let bytes = Protocol::Kitty.encode(&fb).unwrap();
+        assert!(bytes.starts_with(b"\x1b_G"));
+        assert!(bytes.ends_with(b"\x1b\\"));
+        // Original rect at (5,5) should be white.
+        assert_eq!(fb.get_pixel(5, 5), Some(&[255, 255, 255, 255]));
+        // Shadow at offset (7,7) should be dark.
+        let shadow_px = fb.get_pixel(7, 7).unwrap();
+        assert!(shadow_px[3] > 0, "shadow pixel should have alpha");
+    }
+
+    #[test]
+    fn sixel_drop_shadow_pipeline() {
+        let inner = RectLayer::new(5, 5, 5, 5, [255, 255, 255, 255]);
+        let shadow = DropShadow::new(Box::new(inner))
+            .with_offset(2, 2)
+            .with_blur(1)
+            .with_shadow_color([0, 0, 0, 200])
+            .with_z(5);
+        let mut stack = LayerStack::new();
+        stack.push(SolidColor::new(0, 0, 0, 255).with_z(0));
+        stack.push(shadow);
+
+        let mut fb = FrameBuffer::new(20, 20);
+        stack.render(&mut fb);
+
+        let bytes = Protocol::Sixel.encode(&fb).unwrap();
+        assert!(!bytes.is_empty(), "Sixel shadow output must not be empty");
+        // Original rect at (5,5) should be white.
+        assert_eq!(fb.get_pixel(5, 5), Some(&[255, 255, 255, 255]));
     }
 }

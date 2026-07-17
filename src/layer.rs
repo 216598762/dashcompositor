@@ -1010,6 +1010,222 @@ impl Layer for CanvasLayer {
     }
 }
 
+/// A scene graph node that supports parent-child layer relationships
+/// and grouped transforms.
+///
+/// `SceneGraph` is a tree of layers where each node can have children.
+/// Transforms (offset, visibility, opacity) cascade from parent to child:
+///
+/// - **Visibility**: If a parent is invisible, all descendants are invisible.
+/// - **Opacity**: Parent and child opacities multiply.
+/// - **Offset**: Parent offset is added to child offset.
+///
+/// # Example
+///
+/// ```
+/// use termcompositor::{SceneGraph, RectLayer, SolidColor, Layer, FrameBuffer};
+///
+/// let mut scene = SceneGraph::new();
+/// let group = scene.add_group((10, 5), 0.8, true);
+/// scene.add_child_to(group, RectLayer::new(0, 0, 5, 5, [255, 0, 0, 255]));
+/// scene.add_child_to(group, RectLayer::new(6, 0, 5, 5, [0, 255, 0, 255]));
+///
+/// let mut fb = FrameBuffer::new(30, 20);
+/// scene.render(&mut fb, (0, 0), 1.0);
+/// ```
+pub struct SceneGraph {
+    nodes: Vec<SceneNode>,
+    root: usize,
+    z: u32,
+    name: String,
+}
+
+struct SceneNode {
+    layer: Option<Box<dyn Layer>>,
+    children: Vec<usize>,
+    parent: Option<usize>,
+    /// Offset added to all children (accumulated from ancestors).
+    local_offset: (i32, i32),
+    /// Opacity multiplier (multiplied with parent opacity).
+    local_opacity: f32,
+    /// Visibility flag (false = all descendants hidden).
+    visible: bool,
+}
+
+impl SceneGraph {
+    /// Creates a new empty scene graph.
+    pub fn new() -> Self {
+        let root = 0;
+        Self {
+            nodes: vec![SceneNode {
+                layer: None,
+                children: Vec::new(),
+                parent: None,
+                local_offset: (0, 0),
+                local_opacity: 1.0,
+                visible: true,
+            }],
+            root,
+            z: 0,
+            name: "SceneGraph".to_owned(),
+        }
+    }
+
+    /// Builder: sets the default z-order.
+    #[must_use]
+    pub fn with_z(mut self, z: u32) -> Self {
+        self.z = z;
+        self
+    }
+
+    /// Builder: sets a human-readable name.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Adds a group node (no visual layer, just a transform container).
+    /// Returns the node index.
+    pub fn add_group(
+        &mut self,
+        offset: (i32, i32),
+        opacity: f32,
+        visible: bool,
+    ) -> usize {
+        let idx = self.nodes.len();
+        self.nodes.push(SceneNode {
+            layer: None,
+            children: Vec::new(),
+            parent: Some(self.root),
+            local_offset: offset,
+            local_opacity: opacity,
+            visible,
+        });
+        self.nodes[self.root].children.push(idx);
+        idx
+    }
+
+    /// Adds a group node under a specific parent. Returns the node index.
+    pub fn add_group_to(
+        &mut self,
+        parent: usize,
+        offset: (i32, i32),
+        opacity: f32,
+        visible: bool,
+    ) -> usize {
+        let idx = self.nodes.len();
+        self.nodes.push(SceneNode {
+            layer: None,
+            children: Vec::new(),
+            parent: Some(parent),
+            local_offset: offset,
+            local_opacity: opacity,
+            visible,
+        });
+        self.nodes[parent].children.push(idx);
+        idx
+    }
+
+    /// Adds a leaf layer under the root. Returns the node index.
+    pub fn add_child(&mut self, layer: impl Layer + 'static) -> usize {
+        self.add_child_to(self.root, layer)
+    }
+
+    /// Adds a leaf layer under a specific parent. Returns the node index.
+    pub fn add_child_to(&mut self, parent: usize, layer: impl Layer + 'static) -> usize {
+        let idx = self.nodes.len();
+        self.nodes.push(SceneNode {
+            layer: Some(Box::new(layer)),
+            children: Vec::new(),
+            parent: Some(parent),
+            local_offset: (0, 0),
+            local_opacity: 1.0,
+            visible: true,
+        });
+        self.nodes[parent].children.push(idx);
+        idx
+    }
+
+    /// Sets the visibility of a node.
+    pub fn set_visible(&mut self, idx: usize, visible: bool) {
+        if let Some(node) = self.nodes.get_mut(idx) {
+            node.visible = visible;
+        }
+    }
+
+    /// Sets the opacity of a node.
+    pub fn set_opacity(&mut self, idx: usize, opacity: f32) {
+        if let Some(node) = self.nodes.get_mut(idx) {
+            node.local_opacity = opacity;
+        }
+    }
+
+    /// Sets the offset of a node.
+    pub fn set_offset(&mut self, idx: usize, offset: (i32, i32)) {
+        if let Some(node) = self.nodes.get_mut(idx) {
+            node.local_offset = offset;
+        }
+    }
+
+    /// Recursively renders the scene graph into the target framebuffer.
+    fn render_node(
+        &self,
+        idx: usize,
+        target: &mut FrameBuffer,
+        parent_offset: (i32, i32),
+        parent_opacity: f32,
+        parent_visible: bool,
+    ) {
+        let node = &self.nodes[idx];
+        let visible = parent_visible && node.visible;
+        let opacity = parent_opacity * node.local_opacity;
+        let offset = (
+            parent_offset.0 + node.local_offset.0,
+            parent_offset.1 + node.local_offset.1,
+        );
+
+        if visible && opacity > 0.0 {
+            if let Some(layer) = &node.layer {
+                let abs_offset = (
+                    offset.0.max(0) as u32,
+                    offset.1.max(0) as u32,
+                );
+                layer.render(target, abs_offset, opacity);
+            }
+        }
+
+        for &child in &node.children {
+            self.render_node(child, target, offset, opacity, visible);
+        }
+    }
+}
+
+impl Default for SceneGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Layer for SceneGraph {
+    fn z_order(&self) -> u32 {
+        self.z
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn bounds(&self) -> Option<Rect> {
+        None // Scene graph bounds depend on children; no fixed bounds.
+    }
+
+    fn render(&self, target: &mut FrameBuffer, offset: (u32, u32), opacity: f32) {
+        let parent_offset = (offset.0 as i32, offset.1 as i32);
+        self.render_node(self.root, target, parent_offset, opacity, true);
+    }
+}
+
 /// A wrapper layer that adds a drop shadow behind any inner layer.
 ///
 /// `DropShadow` renders the inner layer into a temporary buffer,
@@ -1571,7 +1787,7 @@ impl std::fmt::Debug for LayerEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{BorderLayer, CanvasLayer, DropShadow, GradientKind, GradientLayer, Layer, LayerEntry, RectLayer, SolidColor, TextLayer};
+    use super::{BorderLayer, CanvasLayer, DropShadow, GradientKind, GradientLayer, Layer, LayerEntry, RectLayer, SceneGraph, SolidColor, TextLayer};
     use crate::framebuffer::FrameBuffer;
     use proptest::prelude::*;
     use crate::geometry::Rect;
@@ -2350,6 +2566,182 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // ── SceneGraph tests ──────────────────────────────────────────────────'
+
+    #[test]
+    fn scene_graph_new_defaults() {
+        let scene = SceneGraph::new();
+        assert_eq!(scene.z_order(), 0);
+        assert!(scene.bounds().is_none());
+    }
+
+    #[test]
+    fn scene_graph_builders() {
+        let scene = SceneGraph::new().with_z(5).with_name("my-scene");
+        assert_eq!(scene.z_order(), 5);
+        assert_eq!(scene.name(), "my-scene");
+    }
+
+    #[test]
+    fn scene_graph_default_trait() {
+        let scene = SceneGraph::default();
+        assert_eq!(scene.z_order(), 0);
+    }
+
+    #[test]
+    fn scene_graph_single_child_renders() {
+        let mut scene = SceneGraph::new();
+        scene.add_child(SolidColor::new(255, 0, 0, 255));
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 1.0);
+        // SolidColor fills the whole buffer.
+        for px in fb.pixels() {
+            assert_eq!(*px, [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn scene_graph_group_offset_translates_children() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((3, 2), 1.0, true);
+        scene.add_child_to(group, RectLayer::new(0, 0, 2, 2, [0, 255, 0, 255]));
+        let mut fb = FrameBuffer::new(10, 10);
+        scene.render(&mut fb, (0, 0), 1.0);
+        // Rect should be at offset (3, 2).
+        assert_eq!(fb.get_pixel(3, 2), Some(&[0, 255, 0, 255]));
+        assert_eq!(fb.get_pixel(4, 3), Some(&[0, 255, 0, 255]));
+        // Original position should be empty.
+        assert_eq!(fb.get_pixel(0, 0), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn scene_graph_group_opacity_multiplies() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((0, 0), 0.5, true);
+        scene.add_child_to(group, RectLayer::new(0, 0, 1, 1, [255, 0, 0, 255]));
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 1.0);
+        let px = fb.get_pixel(0, 0).unwrap();
+        assert_eq!(px[0], 255);
+        // Alpha should be ~128 (50% of 255).
+        assert!((px[3] as i32 - 128).abs() <= 1, "alpha = {}", px[3]);
+    }
+
+    #[test]
+    fn scene_graph_hidden_group_hides_children() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((0, 0), 1.0, false);
+        scene.add_child_to(group, RectLayer::new(0, 0, 2, 2, [255, 0, 0, 255]));
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 1.0);
+        // All pixels should be transparent.
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn scene_graph_nested_groups_cascade() {
+        let mut scene = SceneGraph::new();
+        let outer = scene.add_group((5, 5), 0.5, true);
+        let inner = scene.add_group_to(outer, (2, 2), 0.5, true);
+        scene.add_child_to(inner, RectLayer::new(0, 0, 1, 1, [255, 0, 0, 255]));
+        let mut fb = FrameBuffer::new(20, 20);
+        scene.render(&mut fb, (0, 0), 1.0);
+        // Offset should be (5+2, 5+2) = (7, 7).
+        let px = fb.get_pixel(7, 7).unwrap();
+        // RGB should be red.
+        assert_eq!(px[0], 255, "R should be 255");
+        assert_eq!(px[1], 0, "G should be 0");
+        assert_eq!(px[2], 0, "B should be 0");
+        // Opacity should be 0.5 * 0.5 = 0.25 -> alpha ~64.
+        assert!((px[3] as i32 - 64).abs() <= 1, "alpha = {}", px[3]);
+    }
+
+    #[test]
+    fn scene_graph_set_visible_toggles() {
+        let mut scene = SceneGraph::new();
+        let idx = scene.add_child(RectLayer::new(0, 0, 2, 2, [255, 0, 0, 255]));
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 1.0);
+        assert_eq!(fb.get_pixel(0, 0), Some(&[255, 0, 0, 255]));
+
+        scene.set_visible(idx, false);
+        let mut fb2 = FrameBuffer::new(5, 5);
+        scene.render(&mut fb2, (0, 0), 1.0);
+        assert_eq!(fb2.get_pixel(0, 0), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn scene_graph_set_opacity_changes() {
+        let mut scene = SceneGraph::new();
+        let idx = scene.add_child(RectLayer::new(0, 0, 1, 1, [255, 0, 0, 255]));
+        scene.set_opacity(idx, 0.5);
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 1.0);
+        let px = fb.get_pixel(0, 0).unwrap();
+        assert!((px[3] as i32 - 128).abs() <= 1, "alpha = {}", px[3]);
+    }
+
+    #[test]
+    fn scene_graph_set_offset_changes() {
+        let mut scene = SceneGraph::new();
+        let idx = scene.add_child(RectLayer::new(0, 0, 2, 2, [255, 0, 0, 255]));
+        scene.set_offset(idx, (3, 3));
+        let mut fb = FrameBuffer::new(10, 10);
+        scene.render(&mut fb, (0, 0), 1.0);
+        assert_eq!(fb.get_pixel(3, 3), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(0, 0), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn scene_graph_zero_opacity_is_noop() {
+        let mut scene = SceneGraph::new();
+        scene.add_child(SolidColor::new(255, 0, 0, 255));
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 0.0);
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn scene_graph_offset_translates_render() {
+        let mut scene = SceneGraph::new();
+        scene.add_child(SolidColor::new(255, 0, 0, 255));
+        let mut fb = FrameBuffer::new(10, 10);
+        scene.render(&mut fb, (3, 3), 1.0);
+        // SolidColor fills everything regardless of offset.
+        for px in fb.pixels() {
+            assert_eq!(*px, [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn scene_graph_multiple_children_at_different_positions() {
+        let mut scene = SceneGraph::new();
+        scene.add_child_to(scene.root, RectLayer::new(0, 0, 2, 2, [255, 0, 0, 255]));
+        scene.add_child_to(scene.root, RectLayer::new(5, 5, 2, 2, [0, 0, 255, 255]));
+        let mut fb = FrameBuffer::new(10, 10);
+        scene.render(&mut fb, (0, 0), 1.0);
+        assert_eq!(fb.get_pixel(0, 0), Some(&[255, 0, 0, 255]));
+        assert_eq!(fb.get_pixel(5, 5), Some(&[0, 0, 255, 255]));
+        assert_eq!(fb.get_pixel(3, 3), Some(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn scene_graph_hidden_parent_hides_all_descendants() {
+        let mut scene = SceneGraph::new();
+        let group = scene.add_group((0, 0), 1.0, false);
+        let inner = scene.add_group_to(group, (0, 0), 1.0, true);
+        scene.add_child_to(inner, RectLayer::new(0, 0, 2, 2, [255, 0, 0, 255]));
+        let mut fb = FrameBuffer::new(5, 5);
+        scene.render(&mut fb, (0, 0), 1.0);
+        for px in fb.pixels() {
+            assert_eq!(*px, [0, 0, 0, 0]);
         }
     }
 
