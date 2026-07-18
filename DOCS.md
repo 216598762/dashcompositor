@@ -10,6 +10,7 @@ This guide covers how to use `termcompositor` as a library and as a CLI tool.
 - [Library usage](#library-usage)
 - [Animation loop](#animation-loop)
 - [Layer transforms](#layer-transforms)
+- [TextLayer alignment](#textlayer-alignment)
 - [Diff-based rendering](#diff-based-rendering)
 - [Layer lookup by name](#layer-lookup-by-name)
 - [Layer clipping](#layer-clipping)
@@ -407,6 +408,64 @@ let (lx, ly) = t.apply_inverse(tx, ty);
 assert!((lx - 10.0).abs() < 1e-5);
 assert!((ly - 0.0).abs() < 1e-5);
 ```
+
+---
+
+## TextLayer alignment
+
+`TextLayer` supports horizontal alignment via the `TextAlignment` enum
+and the `with_alignment()` builder method. Alignment controls how
+multi-line text is positioned relative to the layer's `(x, y)` origin.
+
+### Quick start
+
+```rust
+use termcompositor::{TextLayer, TextAlignment, FrameBuffer};
+
+let mut fb = FrameBuffer::new(40, 5);
+
+// Left-aligned (default).
+let left = TextLayer::new(5, 0, "Left", [255; 4]);
+assert_eq!(left.alignment(), TextAlignment::Left);
+
+// Centre-aligned: text is centred on x.
+let center = TextLayer::new(20, 1, "Centre", [255; 4])
+    .with_alignment(TextAlignment::Center);
+
+// Right-aligned: text ends at x.
+let right = TextLayer::new(35, 2, "Right", [255; 4])
+    .with_alignment(TextAlignment::Right);
+
+left.render(&mut fb, (0, 0), 1.0);
+center.render(&mut fb, (0, 0), 1.0);
+right.render(&mut fb, (0, 0), 1.0);
+```
+
+### TextAlignment enum
+
+| Variant | Description |
+|---|---|
+| `Left` | Each line starts at `x` (default). |
+| `Center` | Each line is horizontally centred on `x`. |
+| `Right` | Each line ends at `x`. |
+
+### API reference
+
+| Method | Description |
+|---|---|
+| `.with_alignment(alignment)` | Builder: sets the horizontal text alignment. |
+| `alignment()` | Returns the current `TextAlignment`. |
+
+### Notes
+
+- Default alignment is `Left` — existing code is unaffected.
+- The font render path (`font-rasterizer` feature) pre-computes
+  per-line advance widths so Centre/Right alignment works correctly
+  with variable-width glyphs.
+- `bounds()` adjusts the x-origin based on alignment: for `Center`
+  the rect starts at `x - width/2`; for `Right` at `x - width`.
+- Alignment applies per line — each line is independently positioned
+  relative to `(x, y)`.
 
 ---
 
