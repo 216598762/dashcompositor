@@ -126,7 +126,7 @@ impl Transform {
 
     /// Returns whether this transform is the identity (no rotation,
     /// scale = 1.0, anchor at origin).
-    pub const fn is_identity(&self) -> bool {
+    pub fn is_identity(&self) -> bool {
         self.rotation == 0.0 && self.scale_x == 1.0 && self.scale_y == 1.0
     }
 

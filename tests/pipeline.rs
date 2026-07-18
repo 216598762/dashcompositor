@@ -12,6 +12,8 @@
 
 #[allow(unused_imports)]
 use std::io::Write;
+#[allow(unused_imports)]
+use termcompositor::*;
 
 // ── Kitty protocol ───────────────────────────────────────────
 

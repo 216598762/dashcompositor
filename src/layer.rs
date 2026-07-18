@@ -597,7 +597,11 @@ impl TextLayer {
                     // Reading on first render; the caller is
                     // responsible for ensuring the font file
                     // is accessible.
-                    &std::fs::read(path).expect("font-rasterizer: failed to read font file")
+                    let data = std::fs::read(path)
+                        .expect("font-rasterizer: failed to read font file");
+                    // Leak the data so the reference lives long enough.
+                    // This only happens once per TextLayer (on first render).
+                    Box::leak(data.into_boxed_slice())
                 }
                 FontSource::Bytes(b) => b,
             };

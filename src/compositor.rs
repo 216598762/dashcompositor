@@ -121,12 +121,14 @@ impl Compositor for CpuCompositor {
                         apply_transform_to_target(
                             target,
                             &tmp,
-                            transform,
-                            entry.opacity(),
-                            tx_min,
-                            ty_min,
-                            tx_max,
-                            ty_max,
+                            &TransformConfig {
+                                transform: *transform,
+                                opacity: entry.opacity(),
+                                tx_min,
+                                ty_min,
+                                tx_max,
+                                ty_max,
+                            },
                         );
                     }
                 }
@@ -138,31 +140,37 @@ impl Compositor for CpuCompositor {
     }
 }
 
-/// Applies a transform to a source framebuffer and composites the
-/// result onto the target within the given bounding box
-/// `[tx_min, ty_min) .. (tx_max, ty_max)`. Uses inverse mapping:
-// TODO(v2.0): refactor to accept a config struct to reduce argument count
-#[allow(clippy::too_many_arguments)]
-/// for each target pixel, computes the corresponding source
-/// coordinate via the inverse transform, samples with bilinear
-/// interpolation, and blends onto the target.
-fn apply_transform_to_target(
-    target: &mut FrameBuffer,
-    source: &FrameBuffer,
-    transform: &crate::geometry::Transform,
+/// Configuration for [`apply_transform_to_target`].
+#[derive(Debug)]
+struct TransformConfig {
+    /// The transform to apply.
+    transform: crate::geometry::Transform,
+    /// Opacity applied during blending.
     opacity: f32,
+    /// Target-space bounding box: `[tx_min, ty_min) .. (tx_max, ty_max)`.
     tx_min: u32,
     ty_min: u32,
     tx_max: u32,
     ty_max: u32,
+}
+
+/// Applies a transform to a source framebuffer and composites the
+/// result onto the target within the bounding box specified by
+/// `config`. Uses inverse mapping: for each target pixel, computes
+/// the corresponding source coordinate via the inverse transform,
+/// samples with bilinear interpolation, and blends onto the target.
+fn apply_transform_to_target(
+    target: &mut FrameBuffer,
+    source: &FrameBuffer,
+    config: &TransformConfig,
 ) {
     let sw = source.width() as f32;
     let sh = source.height() as f32;
 
-    for ty in ty_min..ty_max {
-        for tx in tx_min..tx_max {
+    for ty in config.ty_min..config.ty_max {
+        for tx in config.tx_min..config.tx_max {
             // Inverse-map target pixel to source space.
-            let (sx, sy) = transform.apply_inverse(tx as f32, ty as f32);
+            let (sx, sy) = config.transform.apply_inverse(tx as f32, ty as f32);
 
             // Bilinear interpolation in source space.
             if sx < 0.0 || sy < 0.0 || sx >= sw || sy >= sh {
@@ -197,7 +205,7 @@ fn apply_transform_to_target(
                 + p11[3] as f32 * fx * fy;
             color[3] = a.round().clamp(0.0, 255.0) as u8;
 
-            let src_alpha = f32::from(color[3]) / 255.0 * opacity;
+            let src_alpha = f32::from(color[3]) / 255.0 * config.opacity;
             if let Some(px) = target.get_pixel_mut(tx, ty) {
                 crate::framebuffer::blend_over(px, &color, src_alpha);
             }
