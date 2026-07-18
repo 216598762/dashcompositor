@@ -531,6 +531,7 @@ mod shadow_pipeline {
 mod gradient_pipeline {
     use super::*;
 
+    #[allow(deprecated)]
     #[test]
     fn kitty_gradient_layer_pipeline() {
         let mut stack = LayerStack::new();
@@ -566,6 +567,7 @@ mod gradient_pipeline {
         );
     }
 
+    #[allow(deprecated)]
     #[test]
     fn kitty_gradient_layer_radial_pipeline() {
         let mut stack = LayerStack::new();
@@ -598,6 +600,7 @@ mod gradient_pipeline {
         );
     }
 
+    #[allow(deprecated)]
     #[test]
     fn sixel_gradient_layer_pipeline() {
         let mut stack = LayerStack::new();
@@ -625,6 +628,7 @@ mod gradient_pipeline {
         assert!(!bytes.is_empty(), "Sixel gradient output must not be empty");
     }
 
+    #[allow(deprecated)]
     #[test]
     fn sixel_gradient_layer_radial_pipeline() {
         let mut stack = LayerStack::new();

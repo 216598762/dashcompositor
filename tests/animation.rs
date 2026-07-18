@@ -251,6 +251,7 @@ mod animation_kitty_pipeline {
         assert_eq!(fb.get_pixel(2, 2), Some(&[0, 0, 0, 255]));
     }
 
+    #[allow(deprecated)]
     #[test]
     fn gradient_layer_renders_and_encodes() {
         let mut stack = LayerStack::new();
@@ -415,6 +416,7 @@ mod animation_sixel_pipeline {
         );
     }
 
+    #[allow(deprecated)]
     #[test]
     fn gradient_and_border_sixel_pipeline() {
         let mut stack = LayerStack::new();

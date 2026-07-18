@@ -1683,7 +1683,7 @@ pub enum GradientKind {
 
 impl GradientLayer {
     /// Creates a new linear gradient layer.
-    // TODO(v2.0): refactor to builder pattern to reduce argument count
+    #[deprecated(since = "2.0.0", note = "use GradientLayerBuilder::new_linear() instead")]
     #[allow(clippy::too_many_arguments)]
     pub fn linear(
         x: u32,
@@ -1716,7 +1716,7 @@ impl GradientLayer {
     }
 
     /// Creates a new radial gradient layer.
-    // TODO(v2.0): refactor to builder pattern to reduce argument count
+    #[deprecated(since = "2.0.0", note = "use GradientLayerBuilder::new_radial() instead")]
     #[allow(clippy::too_many_arguments)]
     pub fn radial(
         x: u32,
@@ -1769,6 +1769,188 @@ impl GradientLayer {
             (f32::from(start[2]) * inv + f32::from(end[2]) * t).round() as u8,
             (f32::from(start[3]) * inv + f32::from(end[3]) * t).round() as u8,
         ]
+    }
+}
+
+// ─── GradientLayerBuilder ─────────────────────────────────────
+
+/// A builder for constructing [`GradientLayer`] instances with a
+/// fluent API. This avoids the high argument count of the legacy
+/// [`GradientLayer::linear`] and [`GradientLayer::radial`]
+/// constructors.
+///
+/// # Example
+///
+/// ```ignore
+/// use termcompositor::GradientLayerBuilder;
+///
+/// let grad = GradientLayerBuilder::new_linear()
+///     .at(0, 0)
+///     .size(100, 50)
+///     .colors([255, 0, 0, 255], [0, 0, 255, 255])
+///     .linear_points(0, 0, 100, 50)
+///     .with_z(1)
+///     .with_name("my-gradient")
+///     .build();
+/// ```
+#[must_use]
+pub struct GradientLayerBuilder {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    start_color: [u8; 4],
+    end_color: [u8; 4],
+    kind: GradientKind,
+    z: u32,
+    name: String,
+}
+
+impl GradientLayerBuilder {
+    /// Creates a new builder for a **linear** gradient with sensible
+    /// defaults: 100×100 at `(0, 0)`, black-to-white, diagonal.
+    pub fn new_linear() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            start_color: [0, 0, 0, 255],
+            end_color: [255, 255, 255, 255],
+            kind: GradientKind::Linear {
+                start_x: 0,
+                start_y: 0,
+                end_x: 100,
+                end_y: 100,
+            },
+            z: 0,
+            name: "GradientLayer".to_owned(),
+        }
+    }
+
+    /// Creates a new builder for a **radial** gradient with sensible
+    /// defaults: 100×100 at `(0, 0)`, black-to-white, centered with
+    /// radius 50.
+    pub fn new_radial() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            start_color: [0, 0, 0, 255],
+            end_color: [255, 255, 255, 255],
+            kind: GradientKind::Radial {
+                center_x: 50,
+                center_y: 50,
+                radius: 50,
+            },
+            z: 0,
+            name: "GradientLayer".to_owned(),
+        }
+    }
+
+    /// Sets the position of the gradient area.
+    pub fn at(mut self, x: u32, y: u32) -> Self {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
+    /// Sets the width and height of the gradient area.
+    pub fn size(mut self, width: u32, height: u32) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
+    /// Sets the start and end colours.
+    pub fn colors(mut self, start_color: [u8; 4], end_color: [u8; 4]) -> Self {
+        self.start_color = start_color;
+        self.end_color = end_color;
+        self
+    }
+
+    /// Sets the linear gradient start and end coordinates. No-op
+    /// (in release builds) if the builder was created with
+    /// [`new_radial`](Self::new_radial); panics in debug builds.
+    pub fn linear_points(
+        mut self,
+        start_x: u32,
+        start_y: u32,
+        end_x: u32,
+        end_y: u32,
+    ) -> Self {
+        debug_assert!(
+            matches!(self.kind, GradientKind::Linear { .. }),
+            "linear_points() called on a radial builder; use radial_params() instead"
+        );
+        if let GradientKind::Linear { .. } = self.kind {
+            self.kind = GradientKind::Linear {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+            };
+        }
+        self
+    }
+
+    /// Sets the radial gradient center and radius. No-op
+    /// (in release builds) if the builder was created with
+    /// [`new_linear`](Self::new_linear); panics in debug builds.
+    pub fn radial_params(
+        mut self,
+        center_x: u32,
+        center_y: u32,
+        radius: u32,
+    ) -> Self {
+        debug_assert!(
+            matches!(self.kind, GradientKind::Radial { .. }),
+            "radial_params() called on a linear builder; use linear_points() instead"
+        );
+        if let GradientKind::Radial { .. } = self.kind {
+            self.kind = GradientKind::Radial {
+                center_x,
+                center_y,
+                radius,
+            };
+        }
+        self
+    }
+
+    /// Sets the z-order.
+    pub fn with_z(mut self, z: u32) -> Self {
+        self.z = z;
+        self
+    }
+
+    /// Sets the layer name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Consumes the builder and returns a [`GradientLayer`].
+    pub fn build(self) -> GradientLayer {
+        GradientLayer {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+            start_color: self.start_color,
+            end_color: self.end_color,
+            kind: self.kind,
+            z: self.z,
+            name: self.name,
+        }
+    }
+}
+
+impl Default for GradientLayerBuilder {
+    /// Returns a builder for a default linear gradient (100×100,
+    /// black-to-white, diagonal).
+    fn default() -> Self {
+        Self::new_linear()
     }
 }
 
@@ -2512,12 +2694,13 @@ fn canvas_layer_bounds() {
 
 // ─── GradientLayer tests ────────────────────────────────────
 
+#[allow(deprecated)]
 #[test]
 fn gradient_linear_new() {
-    let g = GradientLayer::linear(
-        0,
-        0,
-        10,
+        let g = GradientLayer::linear(
+            0,
+            0,
+            10,
         10,
         [255, 0, 0, 255],
         [0, 0, 255, 255],
@@ -2530,11 +2713,10 @@ fn gradient_linear_new() {
     assert_eq!(g.width, 10);
     assert_eq!(g.start_color, [255, 0, 0, 255]);
     assert_eq!(g.end_color, [0, 0, 255, 255]);
-}
-
+}#[allow(deprecated)]
 #[test]
 fn gradient_radial_new() {
-    let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
+        let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
     assert_eq!(g.x, 0);
     assert_eq!(g.width, 10);
     assert_eq!(
@@ -2545,35 +2727,31 @@ fn gradient_radial_new() {
             radius: 5
         }
     );
-}
-
+}#[allow(deprecated)]
 #[test]
-fn gradient_builder() {
-    let g = GradientLayer::linear(0, 0, 10, 10, [255; 4], [0; 4], 0, 0, 10, 10)
+fn gradient_legacy_builder() {
+        let g = GradientLayer::linear(0, 0, 10, 10, [255; 4], [0; 4], 0, 0, 10, 10)
         .with_z(5)
         .with_name("grad");
     assert_eq!(g.z_order(), 5);
     assert_eq!(g.name(), "grad");
-}
-
+}#[allow(deprecated)]
 #[test]
 fn gradient_bounds() {
-    let g = GradientLayer::linear(5, 10, 20, 15, [255; 4], [0; 4], 0, 0, 20, 15);
+        let g = GradientLayer::linear(5, 10, 20, 15, [255; 4], [0; 4], 0, 0, 20, 15);
     assert_eq!(g.bounds(), Some(Rect::new(5, 10, 20, 15)));
-}
-
+}#[allow(deprecated)]
 #[test]
 fn gradient_render_does_not_panic() {
-    let g = GradientLayer::linear(0, 0, 5, 5, [255, 0, 0, 255], [0, 0, 255, 255], 0, 0, 5, 5);
+        let g = GradientLayer::linear(0, 0, 5, 5, [255, 0, 0, 255], [0, 0, 255, 255], 0, 0, 5, 5);
     let mut fb = FrameBuffer::new(10, 10);
     g.render(&mut fb, (0, 0), 1.0);
     let any_pixel = fb.get_pixel(0, 0).is_some_and(|p| p[3] > 0);
     assert!(any_pixel, "linear gradient should render pixels");
-}
-
+}#[allow(deprecated)]
 #[test]
 fn gradient_radial_render_does_not_panic() {
-    let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
+        let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
     let mut fb = FrameBuffer::new(15, 15);
     g.render(&mut fb, (0, 0), 1.0);
     // Check pixel near the center of the gradient (5,5) where alpha should be non-zero
@@ -2582,11 +2760,10 @@ fn gradient_radial_render_does_not_panic() {
         center_pixel,
         "radial gradient center should have non-zero alpha"
     );
-}
-
+}#[allow(deprecated)]
 #[test]
 fn gradient_zero_length_line() {
-    let g = GradientLayer::linear(0, 0, 5, 5, [255; 4], [0; 4], 2, 2, 2, 2);
+        let g = GradientLayer::linear(0, 0, 5, 5, [255; 4], [0; 4], 2, 2, 2, 2);
     let mut fb = FrameBuffer::new(10, 10);
     g.render(&mut fb, (0, 0), 1.0);
     // Zero-length gradient line should render start_color at the gradient position
@@ -2597,6 +2774,68 @@ fn gradient_zero_length_line() {
         "zero-length gradient should render start_color"
     );
 }
+
+    #[test]
+    fn gradient_builder_api() {
+        let g = GradientLayerBuilder::new_linear()
+            .at(0, 0)
+            .size(10, 10)
+            .colors([255, 0, 0, 255], [0, 0, 255, 255])
+            .linear_points(0, 0, 10, 10)
+            .with_z(5)
+            .with_name("my-grad")
+            .build();
+        assert_eq!(g.z_order(), 5);
+        assert_eq!(g.name(), "my-grad");
+        assert_eq!(g.bounds(), Some(Rect::new(0, 0, 10, 10)));
+        assert_eq!(g.start_color, [255, 0, 0, 255]);
+        assert_eq!(g.end_color, [0, 0, 255, 255]);
+        match g.kind {
+            GradientKind::Linear { start_x, start_y, end_x, end_y } => {
+                assert_eq!(start_x, 0);
+                assert_eq!(start_y, 0);
+                assert_eq!(end_x, 10);
+                assert_eq!(end_y, 10);
+            }
+            _ => panic!("expected Linear gradient kind"),
+        }
+    }
+
+    #[test]
+    fn gradient_builder_radial() {
+        let g = GradientLayerBuilder::new_radial()
+            .at(2, 3)
+            .size(20, 20)
+            .colors([255; 4], [0; 4])
+            .radial_params(10, 10, 8)
+            .build();
+        assert_eq!(g.x, 2);
+        assert_eq!(g.y, 3);
+        assert_eq!(g.width, 20);
+        assert_eq!(g.height, 20);
+        assert_eq!(g.start_color, [255; 4]);
+        assert_eq!(g.end_color, [0; 4]);
+        match g.kind {
+            GradientKind::Radial { center_x, center_y, radius } => {
+                assert_eq!(center_x, 10);
+                assert_eq!(center_y, 10);
+                assert_eq!(radius, 8);
+            }
+            _ => panic!("expected Radial gradient kind"),
+        }
+    }
+
+    #[test]
+    fn gradient_builder_default() {
+        let g = GradientLayerBuilder::default().build();
+        assert_eq!(g.x, 0);
+        assert_eq!(g.y, 0);
+        assert_eq!(g.width, 100);
+        assert_eq!(g.height, 100);
+        assert_eq!(g.start_color, [0, 0, 0, 255]);
+        assert_eq!(g.end_color, [255, 255, 255, 255]);
+        assert!(matches!(g.kind, GradientKind::Linear { start_x: 0, start_y: 0, end_x: 100, end_y: 100 }));
+    }
 
 // ─── SceneGraph tests ──────────────────────────────────────
 
