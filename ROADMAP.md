@@ -1,9 +1,59 @@
 # termcompositor Roadmap
 
-**All planned features are now implemented.** This document serves as
-a historical record of the roadmap that was followed to reach v1.0.0.
+**All v1.0.0 features are implemented.** This document tracks the
+original v1.0.0 roadmap (completed) and future v2.0.0 improvements.
 
-Feature ideas for future development, organized by priority tier.
+## v2.0.0 — API Improvements & Technical Debt
+
+Refactoring and API improvements that require breaking changes.
+These are tracked via `TODO(v2.0)` comments in the codebase.
+
+### 1. GradientLayer Builder Pattern
+`GradientLayer::linear()` (10 args) and `GradientLayer::radial()` (9 args)
+have too many arguments. Refactor to a builder pattern with sensible defaults.
+
+**Current API:**
+```rust
+GradientLayer::linear(x, y, w, h, start_color, end_color, start_x, start_y, end_x, end_y)
+GradientLayer::radial(x, y, w, h, start_color, end_color, center_x, center_y, radius)
+```
+
+**Proposed v2.0 API:**
+```rust
+GradientLayer::linear()
+    .at(0, 0)
+    .size(20, 10)
+    .colors([255, 0, 0, 255], [0, 0, 255, 255])
+    .gradient_points(0, 0, 20, 10)
+    .build()
+
+GradientLayer::radial()
+    .at(0, 0)
+    .size(20, 20)
+    .colors([255, 255, 255, 255], [0, 0, 0, 255])
+    .center(10, 10)
+    .radius(10)
+    .build()
+```
+
+**Impact:** ~13 call sites to update (tests/animation.rs, tests/pipeline.rs, src/layer.rs)
+
+### 2. FontSource Memory Leak Fix
+`FontSource::Path` uses `Box::leak` to satisfy lifetime requirements when
+loading fonts from file paths. Store the font data in the struct instead.
+
+**Current approach:** ```Box::leak(data.into_boxed_slice())```
+**Proposed:** Store `Vec<u8>` in a `OnceLock<Vec<u8>>` field alongside `OnceLock<Font>`.
+
+### 3. SceneNode Parent Field Activation
+`SceneNode::parent` is currently `#[allow(dead_code)]` — implement parent-child
+traversal or remove the field if not needed.
+
+---
+
+## v1.0.0 — Historical Roadmap (Completed)
+
+Feature ideas for the original v1.0.0 development, organized by priority tier.
 
 ## Tier 1 — High Impact
 
@@ -113,6 +163,7 @@ readers or headless terminals.
 | v0.14.0 | Animation loop, Layer transforms | ✅ Completed |
 | v0.15.0 | Layer clipping, Rounded corners, Shadow effects | ✅ Completed |
 | v1.0.0 | SVG layer, Scene graph, Accessibility metadata | ✅ Completed |
+| v2.0.0 | GradientLayer builder, FontSource leak fix, SceneNode parent | 🔜 Planned |
 
 ## Completed Features Summary
 
