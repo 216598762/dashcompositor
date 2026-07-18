@@ -365,6 +365,28 @@ impl Layer for RectLayer {
 
 // ─── TextLayer ──────────────────────────────────────────────────
 
+/// Text horizontal alignment.
+///
+/// Controls how multi-line text is positioned relative to the
+/// layer's `(x, y)` origin. The origin marks the start of each
+/// line for `Left`, the centre of each line for `Center`, and
+/// the end of each line for `Right`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextAlignment {
+    /// Left-aligned (default). Each line starts at `x`.
+    Left,
+    /// Centred. Each line is horizontally centred on `x`.
+    Center,
+    /// Right-aligned. Each line ends at `x`.
+    Right,
+}
+
+impl Default for TextAlignment {
+    fn default() -> Self {
+        Self::Left
+    }
+}
+
 /// Source of font data for text rendering.
 ///
 /// Only available when the `font-rasterizer` Cargo feature is
@@ -419,6 +441,8 @@ pub struct TextLayer {
     pub color: [u8; 4],
     z: u32,
     name: String,
+    /// Horizontal text alignment (default: Left).
+    alignment: TextAlignment,
     /// Font size in pixels (only used when `font-rasterizer` is
     /// enabled). Default: 14.0.
     #[cfg(feature = "font-rasterizer")]
@@ -448,6 +472,7 @@ impl TextLayer {
             color,
             z: 0,
             name: "TextLayer".to_owned(),
+            alignment: TextAlignment::Left,
             #[cfg(feature = "font-rasterizer")]
             font_size: 14.0,
             #[cfg(feature = "font-rasterizer")]
@@ -469,6 +494,28 @@ impl TextLayer {
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
+    }
+
+    /// Builder: sets the horizontal text alignment.
+    #[must_use]
+    pub fn with_alignment(mut self, alignment: TextAlignment) -> Self {
+        self.alignment = alignment;
+        self
+    }
+
+    /// Returns the current text alignment.
+    pub fn alignment(&self) -> TextAlignment {
+        self.alignment
+    }
+
+    /// Computes the starting x-coordinate for a new line based on
+    /// the alignment setting. `ox` is the base x-offset.
+    fn line_start_x(&self, ox: i32, line_width: i32) -> i32 {
+        match self.alignment {
+            TextAlignment::Left => ox,
+            TextAlignment::Center => ox - line_width / 2,
+            TextAlignment::Right => ox - line_width,
+        }
     }
 
     /// Returns the text content.
@@ -594,14 +641,25 @@ impl Layer for TextLayer {
             let w = self.text_width();
             let nl = self.num_lines();
             let h = (self.font_size as u32).max(1) * nl;
-            Some(Rect::new(self.x, self.y, w.max(1), h.max(1)))
+            let x = match self.alignment {
+                TextAlignment::Left => self.x,
+                TextAlignment::Center => self.x.saturating_sub(w / 2),
+                TextAlignment::Right => self.x.saturating_sub(w),
+            };
+            Some(Rect::new(x, self.y, w.max(1), h.max(1)))
         }
         #[cfg(not(feature = "font-rasterizer"))]
         {
             // Must stay in sync with render_placeholder, which
             // uses .lines().count() — strip trailing empty lines.
             let nl = self.text.lines().count().max(1) as u32;
-            Some(Rect::new(self.x, self.y, self.text_width(), nl))
+            let w = self.text_width();
+            let x = match self.alignment {
+                TextAlignment::Left => self.x,
+                TextAlignment::Center => self.x.saturating_sub(w / 2),
+                TextAlignment::Right => self.x.saturating_sub(w),
+            };
+            Some(Rect::new(x, self.y, w, nl))
         }
     }
 
@@ -631,50 +689,57 @@ impl TextLayer {
         // Approximate the first baseline at ~85% of font size
         // below the top of the first line.
         let first_baseline_y = oy as i32 + (self.font_size * 0.85) as i32;
-        let mut cursor_x = ox as i32;
-        let mut cursor_y = first_baseline_y;
 
-        for ch in self.text.chars() {
-            if ch == '\n' {
-                cursor_x = ox as i32;
-                cursor_y += line_height;
-                continue;
-            }
-            if ch == ' ' {
-                // Space: use the font's actual space advance width.
+        // Pre-compute line widths so we can apply alignment.
+        let lines: Vec<&str> = self.text.lines().collect();
+        let line_widths: Vec<i32> = lines.iter().map(|line| {
+            line.chars().map(|ch| {
                 let glyph_idx = font.lookup_glyph_index(ch);
                 let (metrics, _) = font.rasterize_indexed(glyph_idx, self.font_size);
-                cursor_x += metrics.advance_width as i32;
-                continue;
-            }
+                metrics.advance_width as i32
+            }).sum()
+        }).collect();
 
-            let glyph_idx = font.lookup_glyph_index(ch);
-            let (metrics, alpha) = font.rasterize_indexed(glyph_idx, self.font_size);
+        for (line_idx, line) in lines.iter().enumerate() {
+            let line_w = line_widths[line_idx];
+            let line_x = self.line_start_x(ox as i32, line_w);
+            let mut cursor_x = line_x;
+            let cursor_y = first_baseline_y + line_idx as i32 * line_height;
 
-            // Position the glyph bitmap relative to the current
-            // line's baseline.
-            let glyph_x = cursor_x + metrics.xmin;
-            let glyph_y = cursor_y + metrics.ymin;
+            for ch in line.chars() {
+                if ch == ' ' {
+                    let glyph_idx = font.lookup_glyph_index(ch);
+                    let (metrics, _) = font.rasterize_indexed(glyph_idx, self.font_size);
+                    cursor_x += metrics.advance_width as i32;
+                    continue;
+                }
 
-            for gy in 0..metrics.height {
-                for gx in 0..metrics.width {
-                    let px = glyph_x + gx as i32;
-                    let py = glyph_y + gy as i32;
-                    if px < 0 || py < 0 {
-                        continue;
-                    }
-                    let alpha_val = alpha[gy * metrics.width + gx];
-                    if alpha_val == 0 {
-                        continue;
-                    }
-                    let glyph_alpha = f32::from(alpha_val) / 255.0 * effective;
-                    if let Some(dst) = target.get_pixel_mut(px as u32, py as u32) {
-                        crate::framebuffer::blend_over(dst, &self.color, glyph_alpha);
+                let glyph_idx = font.lookup_glyph_index(ch);
+                let (metrics, alpha) = font.rasterize_indexed(glyph_idx, self.font_size);
+
+                let glyph_x = cursor_x + metrics.xmin;
+                let glyph_y = cursor_y + metrics.ymin;
+
+                for gy in 0..metrics.height {
+                    for gx in 0..metrics.width {
+                        let px = glyph_x + gx as i32;
+                        let py = glyph_y + gy as i32;
+                        if px < 0 || py < 0 {
+                            continue;
+                        }
+                        let alpha_val = alpha[gy * metrics.width + gx];
+                        if alpha_val == 0 {
+                            continue;
+                        }
+                        let glyph_alpha = f32::from(alpha_val) / 255.0 * effective;
+                        if let Some(dst) = target.get_pixel_mut(px as u32, py as u32) {
+                            crate::framebuffer::blend_over(dst, &self.color, glyph_alpha);
+                        }
                     }
                 }
-            }
 
-            cursor_x += metrics.advance_width as i32;
+                cursor_x += metrics.advance_width as i32;
+            }
         }
     }
 }
@@ -692,10 +757,13 @@ impl TextLayer {
         for (line_idx, line) in self.text.lines().enumerate() {
             let w = line.chars().count() as u32;
             let ty = oy + line_idx as u32;
+            let line_x = self.line_start_x(ox as i32, w as i32);
             for sx in 0..w {
-                let tx = ox + sx;
-                if let Some(px) = target.get_pixel_mut(tx, ty) {
-                    crate::framebuffer::blend_over(px, &self.color, effective);
+                let tx = line_x as i32 + sx as i32;
+                if tx >= 0 {
+                    if let Some(px) = target.get_pixel_mut(tx as u32, ty) {
+                        crate::framebuffer::blend_over(px, &self.color, effective);
+                    }
                 }
             }
         }
@@ -2153,3 +2221,60 @@ mod tests {
         assert!(s.contains("Text"));
     }
 }
+
+    #[test]
+    fn text_alignment_defaults_to_left() {
+        let t = TextLayer::new(0, 0, "hello", [255; 4]);
+        assert_eq!(t.alignment(), TextAlignment::Left);
+    }
+
+    #[test]
+    fn text_alignment_builder() {
+        let t = TextLayer::new(0, 0, "hello", [255; 4])
+            .with_alignment(TextAlignment::Center);
+        assert_eq!(t.alignment(), TextAlignment::Center);
+    }
+
+    #[test]
+    fn text_alignment_right() {
+        let t = TextLayer::new(0, 0, "hello", [255; 4])
+            .with_alignment(TextAlignment::Right);
+        assert_eq!(t.alignment(), TextAlignment::Right);
+    }
+
+    #[test]
+    #[test]
+    fn text_alignment_left_renders_at_x() {
+        use super::*;
+        let t = TextLayer::new(0, 0, "A", [255; 4])
+            .with_alignment(TextAlignment::Left);
+        assert_eq!(t.alignment(), TextAlignment::Left);
+        assert_eq!(t.bounds().unwrap().x, 0);
+    }
+
+    #[test]
+    fn text_alignment_right_renders_before_x() {
+        use super::*;
+        let mut fb = FrameBuffer::new(20, 3);
+        let t = TextLayer::new(15, 0, "AB", [255; 4])
+            .with_alignment(TextAlignment::Right);
+        t.render(&mut fb, (0, 0), 1.0);
+        // Right-aligned: text should end at x=15, so pixels
+        // should be at x < 15.
+        let any_pixel_15plus = (15..20).any(|x| fb.get_pixel(x, 0).map_or(false, |p| p[3] > 0));
+        assert!(!any_pixel_15plus, "right-aligned text should not render past x=15");
+    }
+
+    #[test]
+    fn text_alignment_bounds_adjusts_x() {
+        use super::*;
+        let t_left = TextLayer::new(10, 5, "AB", [255; 4])
+            .with_alignment(TextAlignment::Left);
+        let t_right = TextLayer::new(10, 5, "AB", [255; 4])
+            .with_alignment(TextAlignment::Right);
+        let b_left = t_left.bounds().unwrap();
+        let b_right = t_right.bounds().unwrap();
+        assert_eq!(b_left.x, 10, "left-aligned bounds x should be 10");
+        // Right-aligned: x should be <= 10 (shifted left).
+        assert!(b_right.x <= 10, "right-aligned bounds x should be <= 10, got {}", b_right.x);
+    }
