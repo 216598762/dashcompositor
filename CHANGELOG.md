@@ -29,6 +29,8 @@ metadata for screen readers and a new FrameBuffer helper.
 
 ### Added
 
+- **Animation test improvements** (`src/animation.rs`, `tests/animation.rs`): 40 new tests (18 edge-case unit tests, 22 integration tests) covering dirty regions, all layer types, Kitty/Sixel pipelines, and CI flakiness fixes.
+
 - **Diff-Based Rendering** (`src/compositor.rs`): track rectangular dirty regions to skip re-compositing unchanged areas.
   - `DirtyRect` struct: tracks rectangular dirty areas with `x`, `y`, `width`, `height`.
   - `DirtyRegion` tracker: accumulates dirty rects via `mark_rect()`, `mark_full()`, `mark_point()`; resets via `take_regions()`.

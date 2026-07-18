@@ -2243,7 +2243,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn text_alignment_left_renders_at_x() {
         use super::*;
         let t = TextLayer::new(0, 0, "A", [255; 4])
@@ -2277,4 +2276,453 @@ mod tests {
         assert_eq!(b_left.x, 10, "left-aligned bounds x should be 10");
         // Right-aligned: x should be <= 10 (shifted left).
         assert!(b_right.x <= 10, "right-aligned bounds x should be <= 10, got {}", b_right.x);
+    }
+
+    // ─── DropShadow tests ──────────────────────────────────────
+
+    #[test]
+    fn drop_shadow_new_defaults() {
+        let inner = RectLayer::new(0, 0, 5, 5, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner));
+        assert_eq!(ds.offset, (2, 2));
+        assert_eq!(ds.blur_radius, 2);
+        assert_eq!(ds.shadow_color, [0, 0, 0, 80]);
+        assert_eq!(ds.spread, 0);
+    }
+
+    #[test]
+    fn drop_shadow_builder() {
+        let inner = RectLayer::new(0, 0, 5, 5, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner))
+            .with_offset(3, 4)
+            .with_blur(5)
+            .with_shadow_color([255, 0, 0, 128])
+            .with_spread(2)
+            .with_z(10)
+            .with_name("shadow");
+        assert_eq!(ds.offset, (3, 4));
+        assert_eq!(ds.blur_radius, 5);
+        assert_eq!(ds.shadow_color, [255, 0, 0, 128]);
+        assert_eq!(ds.spread, 2);
+        assert_eq!(ds.z_order(), 10);
+        assert_eq!(ds.name(), "shadow");
+    }
+
+    #[test]
+    fn drop_shadow_glow_builder() {
+        let inner = RectLayer::new(0, 0, 5, 5, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner))
+            .with_glow([255, 200, 0, 200], 4);
+        assert_eq!(ds.shadow_color, [255, 200, 0, 200]);
+        assert_eq!(ds.offset, (0, 0));
+        assert_eq!(ds.blur_radius, 4);
+    }
+
+    #[test]
+    fn drop_shadow_inner_reference() {
+        let inner = RectLayer::new(0, 0, 5, 5, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner));
+        assert_eq!(ds.inner().name(), "Rect(0,0,5x5)");
+    }
+
+    #[test]
+    fn drop_shadow_bounds_delegates_to_inner() {
+        let inner = RectLayer::new(5, 10, 20, 15, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner));
+        assert_eq!(ds.bounds(), Some(Rect::new(5, 10, 20, 15)));
+    }
+
+    #[test]
+    fn drop_shadow_render_does_not_panic() {
+        let inner = RectLayer::new(0, 0, 3, 3, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner));
+        let mut fb = FrameBuffer::new(20, 20);
+        ds.render(&mut fb, (0, 0), 1.0);
+        // Should not panic; some pixels should be non-transparent.
+        let any_pixel = fb.get_pixel(0, 0).map_or(false, |p| p[3] > 0);
+        assert!(any_pixel, "drop shadow should render some pixels");
+    }
+
+    #[test]
+    fn drop_shadow_zero_opacity_is_noop() {
+        let inner = RectLayer::new(0, 0, 5, 5, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner));
+        let mut fb = FrameBuffer::new(20, 20);
+        ds.render(&mut fb, (0, 0), 0.0);
+        assert!(fb.is_fully_transparent());
+    }
+
+    #[test]
+    fn drop_shadow_negative_spread() {
+        let inner = RectLayer::new(0, 0, 10, 10, [255; 4]);
+        let ds = DropShadow::new(Box::new(inner))
+            .with_spread(-2)
+            .with_blur(1);
+        let mut fb = FrameBuffer::new(30, 30);
+        ds.render(&mut fb, (0, 0), 1.0);
+        // Negative spread should still render without panic.
+        let any_pixel = fb.get_pixel(0, 0).map_or(false, |p| p[3] > 0);
+        assert!(any_pixel, "negative spread should still render");
+    }
+
+    // ─── CanvasLayer tests ──────────────────────────────────────
+
+    #[test]
+    fn canvas_layer_defaults() {
+        let c = CanvasLayer::new(10, 8);
+        assert_eq!(c.width(), 10);
+        assert_eq!(c.height(), 8);
+        assert_eq!(c.x, 0);
+        assert_eq!(c.y, 0);
+    }
+
+    #[test]
+    fn canvas_layer_at_sets_position() {
+        let c = CanvasLayer::new(10, 8).at(5, 3);
+        assert_eq!(c.x, 5);
+        assert_eq!(c.y, 3);
+    }
+
+    #[test]
+    fn canvas_layer_draw_pixel_in_bounds() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.draw_pixel(2, 3, [255, 0, 0, 255]);
+        assert_eq!(c.get_pixel(2, 3), Some([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn canvas_layer_draw_pixel_out_of_bounds() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.draw_pixel(10, 10, [255, 0, 0, 255]);
+        assert_eq!(c.get_pixel(10, 10), None);
+    }
+
+    #[test]
+    fn canvas_layer_get_pixel_out_of_bounds() {
+        let c = CanvasLayer::new(5, 5);
+        assert_eq!(c.get_pixel(5, 0), None);
+        assert_eq!(c.get_pixel(0, 5), None);
+    }
+
+    #[test]
+    fn canvas_layer_draw_circle_zero_radius() {
+        let mut c = CanvasLayer::new(10, 10);
+        c.draw_circle(5, 5, 0, [255, 0, 0, 255]);
+        // Zero radius should draw only the center pixel.
+        assert_eq!(c.get_pixel(5, 5), Some([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn canvas_layer_draw_circle_negative_radius() {
+        let mut c = CanvasLayer::new(10, 10);
+        c.draw_circle(5, 5, -1, [255, 0, 0, 255]);
+        // Negative radius should be a no-op.
+        assert!(c.get_pixel(0, 0).map_or(true, |p| p == [0u8, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_fill_rect() {
+        let mut c = CanvasLayer::new(10, 10);
+        c.fill_rect(2, 2, 3, 3, [0, 255, 0, 255]);
+        assert_eq!(c.get_pixel(2, 2), Some([0, 255, 0, 255]));
+        assert_eq!(c.get_pixel(4, 4), Some([0, 255, 0, 255]));
+        assert_eq!(c.get_pixel(5, 5), Some([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_clear() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.fill_rect(0, 0, 5, 5, [255; 4]);
+        c.clear();
+        assert!(c.get_pixel(0, 0).map_or(true, |p| p == [0u8, 0, 0, 0]));
+    }
+
+    #[test]
+    fn canvas_layer_draw_line_horizontal() {
+        let mut c = CanvasLayer::new(10, 10);
+        c.draw_line(0, 5, 9, 5, [255; 4]);
+        for x in 0..10 {
+            assert_eq!(c.get_pixel(x, 5), Some([255; 4]));
+        }
+    }
+
+    #[test]
+    fn canvas_layer_render_does_not_panic() {
+        let mut c = CanvasLayer::new(5, 5);
+        c.draw_pixel(2, 2, [255; 4]);
+        let mut fb = FrameBuffer::new(10, 10);
+        c.render(&mut fb, (0, 0), 1.0);
+        assert_eq!(fb.get_pixel(2, 2), Some(&[255; 4]));
+    }
+
+    #[test]
+    fn canvas_layer_bounds() {
+        let c = CanvasLayer::new(10, 8).at(3, 4);
+        assert_eq!(c.bounds(), Some(Rect::new(3, 4, 10, 8)));
+    }
+
+    // ─── GradientLayer tests ────────────────────────────────────
+
+    #[test]
+    fn gradient_linear_new() {
+        let g = GradientLayer::linear(0, 0, 10, 10, [255, 0, 0, 255], [0, 0, 255, 255], 0, 0, 10, 10);
+        assert_eq!(g.x, 0);
+        assert_eq!(g.width, 10);
+        assert_eq!(g.start_color, [255, 0, 0, 255]);
+        assert_eq!(g.end_color, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn gradient_radial_new() {
+        let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
+        assert_eq!(g.x, 0);
+        assert_eq!(g.width, 10);
+        assert_eq!(g.kind, GradientKind::Radial { center_x: 5, center_y: 5, radius: 5 });
+    }
+
+    #[test]
+    fn gradient_builder() {
+        let g = GradientLayer::linear(0, 0, 10, 10, [255; 4], [0; 4], 0, 0, 10, 10)
+            .with_z(5)
+            .with_name("grad");
+        assert_eq!(g.z_order(), 5);
+        assert_eq!(g.name(), "grad");
+    }
+
+    #[test]
+    fn gradient_bounds() {
+        let g = GradientLayer::linear(5, 10, 20, 15, [255; 4], [0; 4], 0, 0, 20, 15);
+        assert_eq!(g.bounds(), Some(Rect::new(5, 10, 20, 15)));
+    }
+
+    #[test]
+    fn gradient_render_does_not_panic() {
+        let g = GradientLayer::linear(0, 0, 5, 5, [255, 0, 0, 255], [0, 0, 255, 255], 0, 0, 5, 5);
+        let mut fb = FrameBuffer::new(10, 10);
+        g.render(&mut fb, (0, 0), 1.0);
+        let any_pixel = fb.get_pixel(0, 0).map_or(false, |p| p[3] > 0);
+        assert!(any_pixel, "linear gradient should render pixels");
+    }
+
+    #[test]
+    fn gradient_radial_render_does_not_panic() {
+        let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
+        let mut fb = FrameBuffer::new(15, 15);
+        g.render(&mut fb, (0, 0), 1.0);
+        // Check pixel near the center of the gradient (5,5) where alpha should be non-zero
+        let center_pixel = fb.get_pixel(5, 5).map_or(false, |p| p[3] > 0);
+        assert!(center_pixel, "radial gradient center should have non-zero alpha");
+    }
+
+    #[test]
+    fn gradient_zero_length_line() {
+        let g = GradientLayer::linear(0, 0, 5, 5, [255; 4], [0; 4], 2, 2, 2, 2);
+        let mut fb = FrameBuffer::new(10, 10);
+        g.render(&mut fb, (0, 0), 1.0);
+        // Zero-length gradient line should render start_color at the gradient position
+        let pixel = fb.get_pixel(2, 2).unwrap();
+        assert_eq!(pixel, &[255, 255, 255, 255], "zero-length gradient should render start_color");
+    }
+
+    // ─── SceneGraph tests ──────────────────────────────────────
+
+    #[test]
+    fn scene_graph_new() {
+        let s = SceneGraph::new();
+        assert_eq!(s.z_order(), 0);
+        assert_eq!(s.name(), "SceneGraph");
+    }
+
+    #[test]
+    fn scene_graph_builder() {
+        let s = SceneGraph::new().with_z(5).with_name("scene");
+        assert_eq!(s.z_order(), 5);
+        assert_eq!(s.name(), "scene");
+    }
+
+    #[test]
+    fn scene_graph_add_group() {
+        let mut s = SceneGraph::new();
+        let g = s.add_group((10, 5), 0.8, true);
+        assert_eq!(g, 1); // root is 0, first group is 1
+    }
+
+    #[test]
+    fn scene_graph_add_child() {
+        let mut s = SceneGraph::new();
+        let c = s.add_child(RectLayer::new(0, 0, 5, 5, [255; 4]));
+        assert_eq!(c, 1); // root is 0, first child is 1
+    }
+
+    #[test]
+    fn scene_graph_render_does_not_panic() {
+        let mut s = SceneGraph::new();
+        s.add_child(RectLayer::new(0, 0, 5, 5, [255; 4]));
+        let mut fb = FrameBuffer::new(10, 10);
+        s.render(&mut fb, (0, 0), 1.0);
+    }
+
+    #[test]
+    fn scene_graph_empty_render() {
+        let s = SceneGraph::new();
+        let mut fb = FrameBuffer::new(10, 10);
+        s.render(&mut fb, (0, 0), 1.0);
+        assert!(fb.is_fully_transparent());
+    }
+
+    // ─── ClipLayer tests ────────────────────────────────────────
+
+    #[test]
+    fn clip_layer_rect() {
+        let inner = RectLayer::new(0, 0, 20, 20, [255; 4]);
+        let clip = ClipLayer::new(Box::new(inner))
+            .with_region(ClipRegion::Rect(Rect::new(5, 5, 10, 10)));
+        let mut fb = FrameBuffer::new(30, 30);
+        clip.render(&mut fb, (0, 0), 1.0);
+        // Only the clipped region should have pixels.
+        assert_eq!(fb.get_pixel(0, 0), Some(&[0, 0, 0, 0]));
+        assert!(fb.get_pixel(6, 6).unwrap()[3] > 0);
+    }
+
+    #[test]
+    fn clip_layer_layer_bounds() {
+        let inner = RectLayer::new(5, 5, 10, 10, [255; 4]);
+        let clip = ClipLayer::new(Box::new(inner))
+            .with_region(ClipRegion::LayerBounds);
+        let mut fb = FrameBuffer::new(30, 30);
+        clip.render(&mut fb, (0, 0), 1.0);
+        // Should clip to the inner layer's bounds.
+        assert_eq!(fb.get_pixel(4, 4), Some(&[0, 0, 0, 0]));
+        assert!(fb.get_pixel(6, 6).unwrap()[3] > 0);
+    }
+
+    #[test]
+    fn clip_layer_builder() {
+        let inner = RectLayer::new(0, 0, 10, 10, [255; 4]);
+        let clip = ClipLayer::new(Box::new(inner))
+            .with_z(5)
+            .with_name("clip");
+        assert_eq!(clip.z_order(), 5);
+        assert_eq!(clip.name(), "clip");
+    }
+
+    // ─── RectLayer edge case tests ──────────────────────────────
+
+    #[test]
+    fn rect_layer_border_radius_clamped() {
+        let r = RectLayer::new(0, 0, 10, 10, [255; 4])
+            .with_border_radius(100); // larger than min(w,h)/2
+        let mut fb = FrameBuffer::new(20, 20);
+        r.render(&mut fb, (0, 0), 1.0);
+        // Check pixel inside the rect (5,5) - should be non-transparent
+        let any_pixel = fb.get_pixel(5, 5).map_or(false, |p| p[3] > 0);
+        assert!(any_pixel, "rounded rect should render center pixel");
+    }
+
+    #[test]
+    fn rect_layer_zero_size() {
+        let r = RectLayer::new(5, 5, 0, 0, [255; 4]);
+        let mut fb = FrameBuffer::new(10, 10);
+        r.render(&mut fb, (0, 0), 1.0);
+        assert!(fb.is_fully_transparent());
+    }
+
+    #[test]
+    fn rect_layer_zero_opacity() {
+        let r = RectLayer::new(0, 0, 5, 5, [255; 4]);
+        let mut fb = FrameBuffer::new(10, 10);
+        r.render(&mut fb, (0, 0), 0.0);
+        assert!(fb.is_fully_transparent());
+    }
+
+    // ─── TextLayer edge case tests ──────────────────────────────
+
+    #[test]
+    fn text_layer_empty_text() {
+        let t = TextLayer::new(0, 0, "", [255; 4]);
+        assert_eq!(t.text_width(), 0);
+    }
+
+    #[test]
+    fn text_layer_multiline() {
+        let t = TextLayer::new(0, 0, "A\nB\nC", [255; 4]);
+        #[cfg(feature = "font-rasterizer")]
+        assert_eq!(t.num_lines(), 3);
+        #[cfg(not(feature = "font-rasterizer"))]
+        assert_eq!(t.text_width(), 1); // max line width
+    }
+
+    #[test]
+    fn text_layer_render_glyph() {
+        let t = TextLayer::new(0, 0, "hello", [255; 4]);
+        assert_eq!(t.render_glyph(), "hello");
+    }
+
+    #[test]
+    fn text_layer_debug() {
+        let t = TextLayer::new(0, 0, "hi", [255; 4]).with_name("label");
+        let s = format!("{t:?}");
+        assert!(s.contains("TextLayer"));
+        assert!(s.contains("label"));
+    }
+
+    // ─── LayerEntry edge case tests ──────────────────────────────
+
+    #[test]
+    fn layer_entry_into_layer_box() {
+        let entry = LayerEntry::new(0, Box::new(SolidColor::new(0, 0, 0, 255)));
+        let layer = entry.into_layer_box();
+        assert_eq!(layer.name(), "SolidColor(r=0, g=0, b=0, a=255)");
+    }
+
+    #[test]
+    fn layer_entry_set_layer_preserves_state() {
+        let mut entry = LayerEntry::new(5, Box::new(SolidColor::new(0, 0, 0, 255)));
+        entry.set_opacity(0.5);
+        entry.set_visible(false);
+        entry.set_z_override(10);
+        entry.set_name("custom");
+        entry.set_layer(Box::new(RectLayer::new(0, 0, 1, 1, [255; 4])));
+        // All state should be preserved.
+        assert_eq!(entry.id(), 5);
+        assert_eq!(entry.opacity(), 0.5);
+        assert!(!entry.is_visible());
+        assert_eq!(entry.effective_z(), 10);
+        assert_eq!(entry.name(), "custom");
+    }
+
+    #[test]
+    fn layer_entry_transform_roundtrip() {
+        use crate::geometry::Transform;
+        let entry = LayerEntry::new(0, Box::new(SolidColor::new(0, 0, 0, 255)))
+            .with_transform(Transform::new().with_rotation(45.0));
+        assert!(entry.transform().is_some());
+        assert_eq!(entry.transform().unwrap().rotation(), 45.0);
+    }
+
+    // ─── SolidColor edge case tests ──────────────────────────────
+
+    #[test]
+    fn solid_color_render() {
+        let s = SolidColor::new(128, 64, 32, 200);
+        let mut fb = FrameBuffer::new(5, 5);
+        s.render(&mut fb, (0, 0), 1.0);
+        assert_eq!(fb.get_pixel(2, 2), Some(&[128, 64, 32, 200]));
+    }
+
+    #[test]
+    fn solid_color_zero_opacity() {
+        let s = SolidColor::new(255, 0, 0, 255);
+        let mut fb = FrameBuffer::new(5, 5);
+        s.render(&mut fb, (0, 0), 0.0);
+        assert!(fb.is_fully_transparent());
+    }
+
+    #[test]
+    fn solid_color_half_opacity() {
+        let s = SolidColor::new(255, 0, 0, 255);
+        let mut fb = FrameBuffer::new(1, 1);
+        s.render(&mut fb, (0, 0), 0.5);
+        let px = fb.get_pixel(0, 0).unwrap();
+        assert!(px[3] > 0 && px[3] < 255, "alpha should be between 0 and 255, got {}", px[3]);
     }

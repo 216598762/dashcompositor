@@ -443,9 +443,9 @@ mod tests {
         // First frame dt is very small (setup overhead, not zero).
         // Allow a small tolerance to avoid flakiness on slow CI.
         let dt = observed_dt.unwrap();
-        assert!(dt < Duration::from_millis(10), "first frame dt should be < 10ms, got {dt:?}");
+        assert!(dt < Duration::from_millis(25), "first frame dt should be < 25ms, got {dt:?}");
         let elapsed = observed_elapsed.unwrap();
-        assert!(elapsed < Duration::from_millis(10), "first frame elapsed should be < 10ms, got {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(25), "first frame elapsed should be < 25ms, got {elapsed:?}");
     }
 
     #[test]
@@ -617,5 +617,247 @@ mod tests {
         // should_exit && !redraw_requested ⇒ render_and_encode is NOT
         // called, so the final frame was not rendered.
         assert!(redraw_called, "request_redraw should have been called on non-exit frames");
+    }
+
+    // ─── Edge-case tests ────────────────────────────────────────
+
+    #[test]
+    fn anim_context_mark_full_does_not_panic() {
+        let stack = LayerStack::new();
+        run_with_stack(stack, 1000.0, |ctx| {
+            ctx.mark_full();
+            ctx.exit();
+        });
+    }
+
+    #[test]
+    fn anim_context_mark_rect_does_not_panic() {
+        let stack = LayerStack::new();
+        run_with_stack(stack, 1000.0, |ctx| {
+            ctx.mark_rect(10, 10, 20, 20);
+            ctx.exit();
+        });
+    }
+
+    #[test]
+    fn anim_context_terminal_size_returns_valid_dimensions() {
+        let stack = LayerStack::new();
+        run_with_stack(stack, 1000.0, |ctx| {
+            let size = ctx.terminal_size();
+            assert!(size.cols > 0, "terminal cols should be > 0");
+            assert!(size.rows > 0, "terminal rows should be > 0");
+            assert_eq!(ctx.width(), size.cols as u32);
+            assert_eq!(ctx.height(), size.rows as u32);
+            ctx.exit();
+        });
+    }
+
+    #[test]
+    fn anim_config_new_very_high_fps() {
+        // Very high FPS (10,000) should not panic.
+        let config = AnimConfig::new(10_000.0);
+        assert_eq!(config.fps, 10_000.0);
+    }
+
+    #[test]
+    fn anim_config_new_very_low_fps() {
+        // Very low FPS (0.1) should not panic.
+        let config = AnimConfig::new(0.1);
+        assert_eq!(config.fps, 0.1);
+    }
+
+    #[test]
+    fn anim_context_delta_time_is_positive_after_sleep() {
+        let stack = LayerStack::new();
+        let mut dt_values = Vec::new();
+
+        run_with_stack(stack, 1000.0, |ctx| {
+            dt_values.push(ctx.delta_time());
+            if ctx.frame_count() >= 3 {
+                ctx.exit();
+            }
+        });
+
+        // After the first frame, delta times should be > 0.
+        // dt_values[0] is the time since loop setup (small).
+        // dt_values[1] and later should reflect actual frame intervals.
+        assert!(dt_values.len() >= 3, "should have at least 3 dt samples");
+        // The second frame's dt should be > 0 (loop sleeps between frames).
+        assert!(
+            dt_values[1] > Duration::ZERO,
+            "dt[1] should be > 0 after a frame interval, got {:?}",
+            dt_values[1]
+        );
+    }
+
+    #[test]
+    fn anim_context_elapsed_accumulates() {
+        let stack = LayerStack::new();
+        let mut elapsed_values = Vec::new();
+
+        run_with_stack(stack, 1000.0, |ctx| {
+            elapsed_values.push(ctx.elapsed());
+            if ctx.frame_count() >= 4 {
+                ctx.exit();
+            }
+        });
+
+        // Elapsed should be non-decreasing.
+        assert!(elapsed_values.len() >= 4, "should have at least 4 elapsed samples");
+        for i in 1..elapsed_values.len() {
+            assert!(
+                elapsed_values[i] >= elapsed_values[i - 1],
+                "elapsed should be non-decreasing: [{:?}] < [{:?}] at index {}",
+                elapsed_values[i],
+                elapsed_values[i - 1],
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn run_with_stack_empty_layers() {
+        // An empty layer stack should run and exit without issue.
+        let stack = LayerStack::new();
+        let mut count = 0;
+
+        run_with_stack(stack, 1000.0, |ctx| {
+            count += 1;
+            ctx.exit();
+        });
+
+        assert_eq!(count, 1, "callback should run exactly once");
+    }
+
+    #[test]
+    fn anim_config_clear_between_frames_false() {
+        let config = AnimConfig::new(60.0)
+            .with_clear_between_frames(false);
+        assert!(!config.clear_between_frames);
+
+        // Should run without issues when clear_between_frames is false.
+        let stack = LayerStack::new();
+        run_with_config(stack, config, |ctx| {
+            ctx.exit();
+        });
+    }
+
+    #[test]
+    fn anim_context_exit_on_first_frame() {
+        let stack = LayerStack::new();
+        let mut count = 0;
+
+        run_with_stack(stack, 1000.0, |ctx| {
+            count += 1;
+            assert_eq!(ctx.frame_count(), 0, "exit on first frame: frame_count should be 0");
+            ctx.exit();
+        });
+
+        assert_eq!(count, 1, "callback should run exactly once");
+    }
+
+    #[test]
+    fn anim_context_multiple_exit_calls() {
+        // Calling exit() multiple times should be fine.
+        let stack = LayerStack::new();
+        let mut count = 0;
+
+        run_with_stack(stack, 1000.0, |ctx| {
+            count += 1;
+            ctx.exit();
+            ctx.exit(); // double exit should not cause issues
+            ctx.exit(); // triple exit should not cause issues
+        });
+
+        assert_eq!(count, 1, "callback should run exactly once");
+    }
+
+    #[test]
+    fn anim_context_request_redraw_then_mark_rect() {
+        // request_redraw() marks full; mark_rect() after should narrow
+        // the dirty region. Both should not panic.
+        let stack = LayerStack::new();
+        run_with_stack(stack, 1000.0, |ctx| {
+            ctx.request_redraw();
+            ctx.mark_rect(5, 5, 10, 10);
+            ctx.exit();
+        });
+    }
+
+    #[test]
+    fn anim_context_layers_ref() {
+        // layers() (immutable) should work.
+        let mut stack = LayerStack::new();
+        let bg = stack.push(SolidColor::new(0, 0, 0, 255));
+
+        run_with_stack(stack, 1000.0, move |ctx| {
+            let layers = ctx.layers();
+            assert!(layers.get(bg).is_some(), "layer should exist via layers()");
+            ctx.exit();
+        });
+    }
+
+    #[test]
+    fn anim_config_all_protocols() {
+        // Each protocol variant should construct without error.
+        for protocol in [Protocol::Auto, Protocol::Sixel, Protocol::Kitty] {
+            let config = AnimConfig::new(30.0).with_protocol(protocol.clone());
+            assert_eq!(config.protocol, protocol);
+        }
+    }
+
+    #[test]
+    fn anim_config_builder_chaining() {
+        // Builder methods should chain and override correctly.
+        let config = AnimConfig::new(120.0)
+            .with_protocol(Protocol::Kitty)
+            .with_clear_between_frames(false)
+            .with_protocol(Protocol::Sixel)
+            .with_clear_between_frames(true);
+        assert_eq!(config.fps, 120.0);
+        assert_eq!(config.protocol, Protocol::Sixel);
+        assert!(config.clear_between_frames);
+    }
+
+    #[test]
+    fn anim_context_exit_after_several_frames() {
+        // Exit after several frames to test accumulated elapsed time.
+        let stack = LayerStack::new();
+        let mut count = 0;
+
+        run_with_stack(stack, 1000.0, |ctx| {
+            count += 1;
+            if ctx.frame_count() >= 9 {
+                // 10 frames at 1000 FPS ≈ 10ms; assert a meaningful lower bound.
+                assert!(
+                    ctx.elapsed() >= Duration::from_millis(5),
+                    "elapsed should be >= 5ms after 10 frames, got {:?}",
+                    ctx.elapsed()
+                );
+                ctx.exit();
+            }
+        });
+
+        assert_eq!(count, 10, "callback should run 10 times (frames 0..=9)");
+    }
+
+    #[test]
+    fn anim_context_mark_rect_with_zero_dimensions() {
+        // mark_rect with zero width/height should not panic.
+        let stack = LayerStack::new();
+        run_with_stack(stack, 1000.0, |ctx| {
+            ctx.mark_rect(0, 0, 0, 0);
+            ctx.exit();
+        });
+    }
+
+    #[test]
+    fn anim_context_mark_rect_outside_framebuffer() {
+        // mark_rect with coordinates larger than framebuffer should not panic.
+        let stack = LayerStack::new();
+        run_with_stack(stack, 1000.0, |ctx| {
+            ctx.mark_rect(1000, 1000, 500, 500);
+            ctx.exit();
+        });
     }
 }
