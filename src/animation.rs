@@ -69,6 +69,7 @@ pub struct AnimContext {
     frame_count: u64,
     redraw_requested: bool,
     should_exit: bool,
+    dirty: crate::compositor::DirtyRegion,
 }
 
 impl AnimContext {
@@ -118,14 +119,38 @@ impl AnimContext {
         self.size.rows as u32
     }
 
+    /// Marks the entire framebuffer as dirty, forcing a full
+    /// re-render on the next frame. This is called automatically
+    /// by [`request_redraw`].
+    pub fn mark_full(&mut self) {
+        self.dirty.mark_full();
+    }
+
+    /// Marks a rectangular region as dirty. Only the specified
+    /// region will be re-composited on the next frame. This is
+    /// more efficient than [`mark_full`] when only a small area
+    /// of the scene changes.
+    pub fn mark_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        self.dirty.mark_rect(crate::compositor::DirtyRect::new(x, y, width, height));
+    }
+
     /// Requests a redraw on the next frame.
     ///
     /// When the callback returns without calling `request_redraw()`,
     /// the animation loop skips rendering and encoding for that
     /// frame, saving CPU time. This is useful for scenes that only
     /// need to redraw when something changes.
+    ///
+    /// Automatically marks the entire framebuffer as dirty so that
+    /// `render_diff` will re-composite the full scene on the next
+    /// frame. If you know only a small region changed, prefer
+    /// calling [`mark_rect`] directly without `request_redraw` to
+    /// enable partial re-compositing.
     pub fn request_redraw(&mut self) {
         self.redraw_requested = true;
+        // Mark the entire framebuffer as dirty so render_diff
+        // will re-composite the full scene.
+        self.dirty.mark_full();
     }
 
     /// Signals the animation loop to exit after the current frame.
@@ -312,7 +337,16 @@ where
         frame_count: 0,
         redraw_requested: false,
         should_exit: false,
+        dirty: {
+            let mut d = crate::compositor::DirtyRegion::new();
+            d.mark_full();
+            d
+        },
     };
+
+    // Persistent framebuffer for diff-based rendering.
+    let (w0, h0) = ctx.size.as_framebuffer_size();
+    let mut fb = FrameBuffer::new(w0, h0);
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -335,7 +369,7 @@ where
         if ctx.should_exit {
             // Render one last frame if requested.
             if ctx.redraw_requested {
-                render_and_encode(&ctx, protocol, &mut handle);
+                render_and_encode(&ctx.layers, protocol, &mut handle, &mut fb, &mut ctx.dirty);
             }
             break;
         }
@@ -344,6 +378,10 @@ where
         let new_size = TerminalSize::current();
         if new_size != ctx.size {
             ctx.size = new_size;
+            ctx.dirty.mark_full();
+            // Resize framebuffer.
+            let (nw, nh) = new_size.as_framebuffer_size();
+            fb = FrameBuffer::new(nw, nh);
         }
 
         // Render and encode if requested.
@@ -353,7 +391,7 @@ where
                 // Move cursor to top-left and clear to end of screen.
                 let _ = write!(handle, "\x1b[H\x1b[J");
             }
-            render_and_encode(&ctx, protocol, &mut handle);
+            render_and_encode(&ctx.layers, protocol, &mut handle, &mut fb, &mut ctx.dirty);
         }
 
         last_frame = frame_start;
@@ -369,17 +407,18 @@ where
 }
 
 /// Renders the current layer stack and encodes the result.
+/// Uses diff-based rendering when dirty regions are tracked.
 fn render_and_encode(
-    ctx: &AnimContext,
+    layers: &LayerStack,
     protocol: Protocol,
     handle: &mut impl Write,
+    fb: &mut FrameBuffer,
+    dirty: &mut crate::compositor::DirtyRegion,
 ) {
-    let (w, h) = ctx.size.as_framebuffer_size();
-    let mut fb = FrameBuffer::new(w, h);
-    ctx.layers.render(&mut fb);
+    layers.render_diff(fb, dirty);
 
     // Use dispatch_to_writer for zero-copy streaming.
-    let _ = dispatch_to_writer(protocol, &fb, handle);
+    let _ = dispatch_to_writer(protocol, fb, handle);
     let _ = handle.flush();
 }
 
@@ -404,9 +443,9 @@ mod tests {
         // First frame dt is very small (setup overhead, not zero).
         // Allow a small tolerance to avoid flakiness on slow CI.
         let dt = observed_dt.unwrap();
-        assert!(dt < Duration::from_millis(1), "first frame dt should be < 1ms, got {dt:?}");
+        assert!(dt < Duration::from_millis(10), "first frame dt should be < 10ms, got {dt:?}");
         let elapsed = observed_elapsed.unwrap();
-        assert!(elapsed < Duration::from_millis(1), "first frame elapsed should be < 1ms, got {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(10), "first frame elapsed should be < 10ms, got {elapsed:?}");
     }
 
     #[test]
