@@ -5,6 +5,20 @@ technical debt fixes, and developer experience enhancements.
 
 ### Added
 
+- **Animation test improvements** (`src/animation.rs`, `tests/animation.rs`): 40 new tests (18 edge-case unit tests, 22 integration tests) covering dirty regions, all layer types, Kitty/Sixel pipelines, and CI flakiness fixes.
+
+- **Diff-Based Rendering** (`src/compositor.rs`): track rectangular dirty regions to skip re-compositing unchanged areas.
+  - `DirtyRect` struct: tracks rectangular dirty areas with `x`, `y`, `width`, `height`.
+  - `DirtyRegion` tracker: accumulates dirty rects via `mark_rect()`, `mark_full()`, `mark_point()`; resets via `take_regions()`.
+  - `LayerStack::render_diff(target, dirty)`: renders to a temporary buffer and copies only dirty regions to the target framebuffer.
+  - 8 unit tests covering dirty region tracking and diff rendering.
+  - Integrated into the animation loop: `AnimContext` now has a `dirty: DirtyRegion` field, `mark_full()` and `mark_rect()` methods, and `request_redraw()` automatically marks the entire framebuffer as dirty.
+
+- **`LayerStack::find_by_name()` / `find_by_name_mut()`** (`src/compositor.rs`): look up layers by name for convenient runtime modification.
+  - `find_by_name(name) -> Option<&LayerEntry>`: returns a reference to the first entry whose name matches.
+  - `find_by_name_mut(name) -> Option<&mut LayerEntry>`: mutable variant.
+  - 4 unit tests covering lookup, modification, and duplicate-name handling.
+
 - **GradientLayer Builder Pattern** (`src/layer.rs`): refactored the
   verbose `GradientLayer::linear()` (10 args) and `GradientLayer::radial()`
   (9 args) constructors into a fluent builder API.
@@ -77,24 +91,6 @@ metadata for screen readers and a new FrameBuffer helper.
   solid RGBA colour. Silently clips to framebuffer bounds;
   coordinates outside the buffer are ignored. Uses direct
   slice writes for performance. 4 unit tests.
-
-## [Unreleased]
-
-### Added
-
-- **Animation test improvements** (`src/animation.rs`, `tests/animation.rs`): 40 new tests (18 edge-case unit tests, 22 integration tests) covering dirty regions, all layer types, Kitty/Sixel pipelines, and CI flakiness fixes.
-
-- **Diff-Based Rendering** (`src/compositor.rs`): track rectangular dirty regions to skip re-compositing unchanged areas.
-  - `DirtyRect` struct: tracks rectangular dirty areas with `x`, `y`, `width`, `height`.
-  - `DirtyRegion` tracker: accumulates dirty rects via `mark_rect()`, `mark_full()`, `mark_point()`; resets via `take_regions()`.
-  - `LayerStack::render_diff(target, dirty)`: renders to a temporary buffer and copies only dirty regions to the target framebuffer.
-  - 8 unit tests covering dirty region tracking and diff rendering.
-  - Integrated into the animation loop: `AnimContext` now has a `dirty: DirtyRegion` field, `mark_full()` and `mark_rect()` methods, and `request_redraw()` automatically marks the entire framebuffer as dirty.
-
-- **`LayerStack::find_by_name()` / `find_by_name_mut()`** (`src/compositor.rs`): look up layers by name for convenient runtime modification.
-  - `find_by_name(name) -> Option<&LayerEntry>`: returns a reference to the first entry whose name matches.
-  - `find_by_name_mut(name) -> Option<&mut LayerEntry>`: mutable variant.
-  - 4 unit tests covering lookup, modification, and duplicate-name handling.
 
 ## 0.15.0 (2026-07-18)
 
