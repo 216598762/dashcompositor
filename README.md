@@ -49,8 +49,9 @@ Enable at least one encoder feature to produce terminal output.
 
 ## MSRV
 
-**1.73** — pinned in `Cargo.toml` and validated in CI. Only the `font-rasterizer` and
-`image-decoder` features are tested on Rust 1.73; the encoder features require Rust ≥ 1.85.
+**1.73** — pinned in `Cargo.toml` and validated in CI. Only the `font-rasterizer`
+feature is tested on Rust 1.73; `kitty-encoder`, `sixel-encoder`, and `image-decoder`
+all require Rust ≥ 1.85.
 
 ## License
 
