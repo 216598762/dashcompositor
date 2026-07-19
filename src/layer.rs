@@ -602,12 +602,9 @@ impl TextLayer {
             // `font_data`. This avoids `Box::leak` for `FontSource::Path`.
             let bytes: &[u8] = match &self.font_source {
                 FontSource::Bundled => BUNDLED_FONT_DATA,
-                FontSource::Path(path) => {
-                    self.font_data.get_or_init(|| {
-                        std::fs::read(path)
-                            .expect("font-rasterizer: failed to read font file")
-                    })
-                }
+                FontSource::Path(path) => self.font_data.get_or_init(|| {
+                    std::fs::read(path).expect("font-rasterizer: failed to read font file")
+                }),
                 FontSource::Bytes(b) => b,
             };
             fontdue::Font::from_bytes(
@@ -1777,7 +1774,10 @@ pub enum GradientKind {
 
 impl GradientLayer {
     /// Creates a new linear gradient layer.
-    #[deprecated(since = "2.0.0", note = "use GradientLayerBuilder::new_linear() instead")]
+    #[deprecated(
+        since = "2.0.0",
+        note = "use GradientLayerBuilder::new_linear() instead"
+    )]
     #[allow(clippy::too_many_arguments)]
     pub fn linear(
         x: u32,
@@ -1810,7 +1810,10 @@ impl GradientLayer {
     }
 
     /// Creates a new radial gradient layer.
-    #[deprecated(since = "2.0.0", note = "use GradientLayerBuilder::new_radial() instead")]
+    #[deprecated(
+        since = "2.0.0",
+        note = "use GradientLayerBuilder::new_radial() instead"
+    )]
     #[allow(clippy::too_many_arguments)]
     pub fn radial(
         x: u32,
@@ -1968,13 +1971,7 @@ impl GradientLayerBuilder {
     /// Sets the linear gradient start and end coordinates. No-op
     /// (in release builds) if the builder was created with
     /// [`new_radial`](Self::new_radial); panics in debug builds.
-    pub fn linear_points(
-        mut self,
-        start_x: u32,
-        start_y: u32,
-        end_x: u32,
-        end_y: u32,
-    ) -> Self {
+    pub fn linear_points(mut self, start_x: u32, start_y: u32, end_x: u32, end_y: u32) -> Self {
         debug_assert!(
             matches!(self.kind, GradientKind::Linear { .. }),
             "linear_points() called on a radial builder; use radial_params() instead"
@@ -1993,12 +1990,7 @@ impl GradientLayerBuilder {
     /// Sets the radial gradient center and radius. No-op
     /// (in release builds) if the builder was created with
     /// [`new_linear`](Self::new_linear); panics in debug builds.
-    pub fn radial_params(
-        mut self,
-        center_x: u32,
-        center_y: u32,
-        radius: u32,
-    ) -> Self {
+    pub fn radial_params(mut self, center_x: u32, center_y: u32, radius: u32) -> Self {
         debug_assert!(
             matches!(self.kind, GradientKind::Radial { .. }),
             "radial_params() called on a linear builder; use linear_points() instead"
@@ -2792,10 +2784,10 @@ fn canvas_layer_bounds() {
 #[allow(deprecated)]
 #[test]
 fn gradient_linear_new() {
-        let g = GradientLayer::linear(
-            0,
-            0,
-            10,
+    let g = GradientLayer::linear(
+        0,
+        0,
+        10,
         10,
         [255, 0, 0, 255],
         [0, 0, 255, 255],
@@ -2813,7 +2805,7 @@ fn gradient_linear_new() {
 #[allow(deprecated)]
 #[test]
 fn gradient_radial_new() {
-        let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
+    let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
     assert_eq!(g.x, 0);
     assert_eq!(g.width, 10);
     assert_eq!(
@@ -2823,13 +2815,14 @@ fn gradient_radial_new() {
             center_y: 5,
             radius: 5
         }
-    );}
+    );
+}
 
 #[allow(deprecated)]
 #[test]
-    // Intentionally tests the deprecated API for backwards compatibility.
-    fn gradient_legacy_builder() {
-        let g = GradientLayer::linear(0, 0, 10, 10, [255; 4], [0; 4], 0, 0, 10, 10)
+// Intentionally tests the deprecated API for backwards compatibility.
+fn gradient_legacy_builder() {
+    let g = GradientLayer::linear(0, 0, 10, 10, [255; 4], [0; 4], 0, 0, 10, 10)
         .with_z(5)
         .with_name("grad");
     assert_eq!(g.z_order(), 5);
@@ -2842,12 +2835,13 @@ fn gradient_radial_new() {
 #[allow(deprecated)]
 #[test]
 fn gradient_bounds() {
-        let g = GradientLayer::linear(5, 10, 20, 15, [255; 4], [0; 4], 0, 0, 20, 15);
+    let g = GradientLayer::linear(5, 10, 20, 15, [255; 4], [0; 4], 0, 0, 20, 15);
     assert_eq!(g.bounds(), Some(Rect::new(5, 10, 20, 15)));
-}#[allow(deprecated)]
+}
+#[allow(deprecated)]
 #[test]
 fn gradient_render_does_not_panic() {
-        let g = GradientLayer::linear(0, 0, 5, 5, [255, 0, 0, 255], [0, 0, 255, 255], 0, 0, 5, 5);
+    let g = GradientLayer::linear(0, 0, 5, 5, [255, 0, 0, 255], [0, 0, 255, 255], 0, 0, 5, 5);
     let mut fb = FrameBuffer::new(10, 10);
     g.render(&mut fb, (0, 0), 1.0);
     let any_pixel = fb.get_pixel(0, 0).is_some_and(|p| p[3] > 0);
@@ -2857,7 +2851,7 @@ fn gradient_render_does_not_panic() {
 #[allow(deprecated)]
 #[test]
 fn gradient_radial_render_does_not_panic() {
-        let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
+    let g = GradientLayer::radial(0, 0, 10, 10, [255; 4], [0; 4], 5, 5, 5);
     let mut fb = FrameBuffer::new(15, 15);
     g.render(&mut fb, (0, 0), 1.0);
     // Check pixel near the center of the gradient (5,5) where alpha should be non-zero
@@ -2871,7 +2865,7 @@ fn gradient_radial_render_does_not_panic() {
 #[allow(deprecated)]
 #[test]
 fn gradient_zero_length_line() {
-        let g = GradientLayer::linear(0, 0, 5, 5, [255; 4], [0; 4], 2, 2, 2, 2);
+    let g = GradientLayer::linear(0, 0, 5, 5, [255; 4], [0; 4], 2, 2, 2, 2);
     let mut fb = FrameBuffer::new(10, 10);
     g.render(&mut fb, (0, 0), 1.0);
     // Zero-length gradient line should render start_color at the gradient position
@@ -2883,99 +2877,114 @@ fn gradient_zero_length_line() {
     );
 }
 
-    #[test]
-    fn gradient_builder_api() {
-        let g = GradientLayerBuilder::new_linear()
-            .at(0, 0)
-            .size(10, 10)
-            .colors([255, 0, 0, 255], [0, 0, 255, 255])
-            .linear_points(0, 0, 10, 10)
-            .with_z(5)
-            .with_name("my-grad")
-            .build();
-        assert_eq!(g.z_order(), 5);
-        assert_eq!(g.name(), "my-grad");
-        assert_eq!(g.bounds(), Some(Rect::new(0, 0, 10, 10)));
-        assert_eq!(g.start_color, [255, 0, 0, 255]);
-        assert_eq!(g.end_color, [0, 0, 255, 255]);
-        match g.kind {
-            GradientKind::Linear { start_x, start_y, end_x, end_y } => {
-                assert_eq!(start_x, 0);
-                assert_eq!(start_y, 0);
-                assert_eq!(end_x, 10);
-                assert_eq!(end_y, 10);
-            }
-            _ => panic!("expected Linear gradient kind"),
+#[test]
+fn gradient_builder_api() {
+    let g = GradientLayerBuilder::new_linear()
+        .at(0, 0)
+        .size(10, 10)
+        .colors([255, 0, 0, 255], [0, 0, 255, 255])
+        .linear_points(0, 0, 10, 10)
+        .with_z(5)
+        .with_name("my-grad")
+        .build();
+    assert_eq!(g.z_order(), 5);
+    assert_eq!(g.name(), "my-grad");
+    assert_eq!(g.bounds(), Some(Rect::new(0, 0, 10, 10)));
+    assert_eq!(g.start_color, [255, 0, 0, 255]);
+    assert_eq!(g.end_color, [0, 0, 255, 255]);
+    match g.kind {
+        GradientKind::Linear {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+        } => {
+            assert_eq!(start_x, 0);
+            assert_eq!(start_y, 0);
+            assert_eq!(end_x, 10);
+            assert_eq!(end_y, 10);
         }
+        _ => panic!("expected Linear gradient kind"),
     }
+}
 
-    #[test]
-    fn gradient_builder_radial() {
-        let g = GradientLayerBuilder::new_radial()
-            .at(2, 3)
-            .size(20, 20)
-            .colors([255; 4], [0; 4])
-            .radial_params(10, 10, 8)
-            .build();
-        assert_eq!(g.x, 2);
-        assert_eq!(g.y, 3);
-        assert_eq!(g.width, 20);
-        assert_eq!(g.height, 20);
-        assert_eq!(g.start_color, [255; 4]);
-        assert_eq!(g.end_color, [0; 4]);
-        match g.kind {
-            GradientKind::Radial { center_x, center_y, radius } => {
-                assert_eq!(center_x, 10);
-                assert_eq!(center_y, 10);
-                assert_eq!(radius, 8);
-            }
-            _ => panic!("expected Radial gradient kind"),
+#[test]
+fn gradient_builder_radial() {
+    let g = GradientLayerBuilder::new_radial()
+        .at(2, 3)
+        .size(20, 20)
+        .colors([255; 4], [0; 4])
+        .radial_params(10, 10, 8)
+        .build();
+    assert_eq!(g.x, 2);
+    assert_eq!(g.y, 3);
+    assert_eq!(g.width, 20);
+    assert_eq!(g.height, 20);
+    assert_eq!(g.start_color, [255; 4]);
+    assert_eq!(g.end_color, [0; 4]);
+    match g.kind {
+        GradientKind::Radial {
+            center_x,
+            center_y,
+            radius,
+        } => {
+            assert_eq!(center_x, 10);
+            assert_eq!(center_y, 10);
+            assert_eq!(radius, 8);
         }
+        _ => panic!("expected Radial gradient kind"),
     }
+}
 
-    #[test]
-    fn gradient_builder_default() {
-        let g = GradientLayerBuilder::default().build();
-        assert_eq!(g.x, 0);
-        assert_eq!(g.y, 0);
-        assert_eq!(g.width, 100);
-        assert_eq!(g.height, 100);
-        assert_eq!(g.start_color, [0, 0, 0, 255]);
-        assert_eq!(g.end_color, [255, 255, 255, 255]);
-        assert!(matches!(g.kind, GradientKind::Linear { start_x: 0, start_y: 0, end_x: 100, end_y: 100 }));
-    }
+#[test]
+fn gradient_builder_default() {
+    let g = GradientLayerBuilder::default().build();
+    assert_eq!(g.x, 0);
+    assert_eq!(g.y, 0);
+    assert_eq!(g.width, 100);
+    assert_eq!(g.height, 100);
+    assert_eq!(g.start_color, [0, 0, 0, 255]);
+    assert_eq!(g.end_color, [255, 255, 255, 255]);
+    assert!(matches!(
+        g.kind,
+        GradientKind::Linear {
+            start_x: 0,
+            start_y: 0,
+            end_x: 100,
+            end_y: 100
+        }
+    ));
+}
 
-    #[test]
-    fn gradient_builder_zero_length_line() {
-        let g = GradientLayerBuilder::new_linear()
-            .at(0, 0)
-            .size(5, 5)
-            .colors([255; 4], [0; 4])
-            .linear_points(2, 2, 2, 2)
-            .build();
-        let mut fb = FrameBuffer::new(10, 10);
-        g.render(&mut fb, (0, 0), 1.0);
-        let pixel = fb.get_pixel(2, 2).unwrap();
-        assert_eq!(
-            pixel,
-            &[255, 255, 255, 255],
-            "zero-length gradient should render start_color"
-        );
-    }
+#[test]
+fn gradient_builder_zero_length_line() {
+    let g = GradientLayerBuilder::new_linear()
+        .at(0, 0)
+        .size(5, 5)
+        .colors([255; 4], [0; 4])
+        .linear_points(2, 2, 2, 2)
+        .build();
+    let mut fb = FrameBuffer::new(10, 10);
+    g.render(&mut fb, (0, 0), 1.0);
+    let pixel = fb.get_pixel(2, 2).unwrap();
+    assert_eq!(
+        pixel,
+        &[255, 255, 255, 255],
+        "zero-length gradient should render start_color"
+    );
+}
 
-    #[test]
-    #[should_panic(expected = "linear_points() called on a radial builder")]
-    fn gradient_builder_linear_points_on_radial_panics() {
-        let _ = GradientLayerBuilder::new_radial()
-            .linear_points(0, 0, 10, 10);
-    }
+#[test]
+#[should_panic(expected = "linear_points() called on a radial builder")]
+fn gradient_builder_linear_points_on_radial_panics() {
+    let _ = GradientLayerBuilder::new_radial().linear_points(0, 0, 10, 10);
+}
 
-    #[test]
-    #[should_panic(expected = "radial_params() called on a linear builder")]
-    fn gradient_builder_radial_params_on_linear_panics() {
-        let _ = GradientLayerBuilder::new_linear()
-            .radial_params(0, 0, 10);
-    }
+#[test]
+#[should_panic(expected = "radial_params() called on a linear builder")]
+fn gradient_builder_radial_params_on_linear_panics() {
+    let _ = GradientLayerBuilder::new_linear().radial_params(0, 0, 10);
+}
 
 // ─── SceneGraph tests ──────────────────────────────────────
 
@@ -3013,85 +3022,86 @@ fn scene_graph_render_does_not_panic() {
     s.add_child(RectLayer::new(0, 0, 5, 5, [255; 4]));
     let mut fb = FrameBuffer::new(10, 10);
     s.render(&mut fb, (0, 0), 1.0);
-}    #[test]
-    fn scene_graph_empty_render() {
-        let s = SceneGraph::new();
-        let mut fb = FrameBuffer::new(10, 10);
-        s.render(&mut fb, (0, 0), 1.0);
-        assert!(fb.is_fully_transparent());
-    }
+}
+#[test]
+fn scene_graph_empty_render() {
+    let s = SceneGraph::new();
+    let mut fb = FrameBuffer::new(10, 10);
+    s.render(&mut fb, (0, 0), 1.0);
+    assert!(fb.is_fully_transparent());
+}
 
-    #[test]
-    fn scene_graph_parent_child_traversal() {
-        let mut sg = SceneGraph::new();
-        let root = 0;
-        let g1 = sg.add_group((10, 10), 1.0, true);
-        let g2 = sg.add_group_to(g1, (20, 20), 0.5, true);
-        let c1 = sg.add_child_to(g2, RectLayer::new(0, 0, 5, 5, [255; 4]));
+#[test]
+fn scene_graph_parent_child_traversal() {
+    let mut sg = SceneGraph::new();
+    let root = 0;
+    let g1 = sg.add_group((10, 10), 1.0, true);
+    let g2 = sg.add_group_to(g1, (20, 20), 0.5, true);
+    let c1 = sg.add_child_to(g2, RectLayer::new(0, 0, 5, 5, [255; 4]));
 
-        // parent()
-        assert_eq!(sg.parent(root), None);
-        assert_eq!(sg.parent(g1), Some(root));
-        assert_eq!(sg.parent(g2), Some(g1));
-        assert_eq!(sg.parent(c1), Some(g2));
+    // parent()
+    assert_eq!(sg.parent(root), None);
+    assert_eq!(sg.parent(g1), Some(root));
+    assert_eq!(sg.parent(g2), Some(g1));
+    assert_eq!(sg.parent(c1), Some(g2));
 
-        // children()
-        assert_eq!(sg.children(root), &[g1]);
-        assert_eq!(sg.children(g1), &[g2]);
-        assert_eq!(sg.children(g2), &[c1]);
-        assert!(sg.children(c1).is_empty());
-    }
+    // children()
+    assert_eq!(sg.children(root), &[g1]);
+    assert_eq!(sg.children(g1), &[g2]);
+    assert_eq!(sg.children(g2), &[c1]);
+    assert!(sg.children(c1).is_empty());
+}
 
-    #[test]
-    fn scene_graph_ancestors_and_depth() {
-        let mut sg = SceneGraph::new();
-        let g1 = sg.add_group((0, 0), 1.0, true);
-        let g2 = sg.add_group_to(g1, (0, 0), 1.0, true);
-        let c = sg.add_child_to(g2, RectLayer::new(0, 0, 1, 1, [255; 4]));
+#[test]
+fn scene_graph_ancestors_and_depth() {
+    let mut sg = SceneGraph::new();
+    let g1 = sg.add_group((0, 0), 1.0, true);
+    let g2 = sg.add_group_to(g1, (0, 0), 1.0, true);
+    let c = sg.add_child_to(g2, RectLayer::new(0, 0, 1, 1, [255; 4]));
 
-        assert_eq!(sg.ancestors(c), vec![g2, g1, 0]);
-        assert_eq!(sg.depth(c), 3);
-        assert_eq!(sg.depth(g1), 1);
-        assert_eq!(sg.depth(0), 0);
-    }
+    assert_eq!(sg.ancestors(c), vec![g2, g1, 0]);
+    assert_eq!(sg.depth(c), 3);
+    assert_eq!(sg.depth(g1), 1);
+    assert_eq!(sg.depth(0), 0);
+}
 
-    #[test]
-    fn scene_graph_descendants() {
-        let mut sg = SceneGraph::new();
-        let g1 = sg.add_group((0, 0), 1.0, true);
-        let g2 = sg.add_group_to(g1, (0, 0), 1.0, true);
-        let c1 = sg.add_child_to(g1, RectLayer::new(0, 0, 1, 1, [255; 4]));
-        let c2 = sg.add_child_to(g2, RectLayer::new(0, 0, 1, 1, [255; 4]));
+#[test]
+fn scene_graph_descendants() {
+    let mut sg = SceneGraph::new();
+    let g1 = sg.add_group((0, 0), 1.0, true);
+    let g2 = sg.add_group_to(g1, (0, 0), 1.0, true);
+    let c1 = sg.add_child_to(g1, RectLayer::new(0, 0, 1, 1, [255; 4]));
+    let c2 = sg.add_child_to(g2, RectLayer::new(0, 0, 1, 1, [255; 4]));
 
-        let desc = sg.descendants(0);
-        assert!(desc.contains(&g1));
-        assert!(desc.contains(&c1));
-        assert!(desc.contains(&c2));
-    }
+    let desc = sg.descendants(0);
+    assert!(desc.contains(&g1));
+    assert!(desc.contains(&c1));
+    assert!(desc.contains(&c2));
+}
 
-    #[test]
-    fn scene_graph_move_to() {
-        let mut sg = SceneGraph::new();
-        let g1 = sg.add_group((0, 0), 1.0, true);
-        let g2 = sg.add_group((0, 0), 1.0, true);
-        let c = sg.add_child_to(g1, RectLayer::new(0, 0, 1, 1, [255; 4]));
+#[test]
+fn scene_graph_move_to() {
+    let mut sg = SceneGraph::new();
+    let g1 = sg.add_group((0, 0), 1.0, true);
+    let g2 = sg.add_group((0, 0), 1.0, true);
+    let c = sg.add_child_to(g1, RectLayer::new(0, 0, 1, 1, [255; 4]));
 
-        assert_eq!(sg.parent(c), Some(g1));
-        assert!(sg.move_to(c, g2).is_ok());
-        assert_eq!(sg.parent(c), Some(g2));
-    }
+    assert_eq!(sg.parent(c), Some(g1));
+    assert!(sg.move_to(c, g2).is_ok());
+    assert_eq!(sg.parent(c), Some(g2));
+}
 
-    #[test]
-    fn scene_graph_move_to_cycle_detected() {
-        let mut sg = SceneGraph::new();
-        let g1 = sg.add_group((0, 0), 1.0, true);
-        let g2 = sg.add_group_to(g1, (0, 0), 1.0, true);
+#[test]
+fn scene_graph_move_to_cycle_detected() {
+    let mut sg = SceneGraph::new();
+    let g1 = sg.add_group((0, 0), 1.0, true);
+    let g2 = sg.add_group_to(g1, (0, 0), 1.0, true);
 
-        // Moving g1 under g2 would create a cycle.
-        assert!(sg.move_to(g1, g2).is_err());
-        // Moving under self is rejected.
-        assert!(sg.move_to(g1, g1).is_err());
-    }
+    // Moving g1 under g2 would create a cycle.
+    assert!(sg.move_to(g1, g2).is_err());
+    // Moving under self is rejected.
+    assert!(sg.move_to(g1, g1).is_err());
+}
 
 // ─── ClipLayer tests ────────────────────────────────────────
 

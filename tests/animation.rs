@@ -10,14 +10,14 @@
 use termcompositor::{DirtyRect, DirtyRegion, FrameBuffer, LayerStack, RectLayer, SolidColor};
 // Encoder-specific imports: some are only used with kitty, others with sixel.
 // Allow unused_imports so the file compiles cleanly with any feature combination.
+#[cfg(all(feature = "font-rasterizer", feature = "kitty-encoder"))]
+use termcompositor::TextLayer;
 #[cfg(any(feature = "kitty-encoder", feature = "sixel-encoder"))]
 #[allow(unused_imports)]
 use termcompositor::{
-    dispatch_to_writer, BorderLayer, CanvasLayer, ClipLayer, ClipRegion, DropShadow,
-    GradientLayer, Protocol, ProtocolEncoder, Rect,
+    dispatch_to_writer, BorderLayer, CanvasLayer, ClipLayer, ClipRegion, DropShadow, GradientLayer,
+    Protocol, ProtocolEncoder, Rect,
 };
-#[cfg(all(feature = "font-rasterizer", feature = "kitty-encoder"))]
-use termcompositor::TextLayer;
 
 // ── render_diff with dirty regions ───────────────────────────
 
