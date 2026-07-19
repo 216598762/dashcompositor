@@ -10,9 +10,11 @@ This guide covers how to use `termcompositor` as a library and as a CLI tool.
 - [Library usage](#library-usage)
 - [Animation loop](#animation-loop)
 - [Layer transforms](#layer-transforms)
+- [GradientLayer builder](#gradientlayer-builder)
 - [TextLayer alignment](#textlayer-alignment)
 - [Diff-based rendering](#diff-based-rendering)
 - [Layer lookup by name](#layer-lookup-by-name)
+- [SceneNode parent-child traversal](#scenenode-parent-child-traversal)
 - [Layer clipping](#layer-clipping)
 - [Rounded corners](#rounded-corners)
 - [Shadow and glow effects](#shadow-and-glow-effects)
@@ -33,14 +35,14 @@ This guide covers how to use `termcompositor` as a library and as a CLI tool.
 
 ```toml
 [dependencies]
-termcompositor = "0.12"
+termcompositor = "2.0"
 ```
 
 Enable encoder features to produce terminal output:
 
 ```toml
 [dependencies]
-termcompositor = { version = "0.12", features = ["kitty-encoder", "sixel-encoder"] }
+termcompositor = { version = "2.0", features = ["kitty-encoder", "sixel-encoder"] }
 ```
 
 ### As a CLI tool
@@ -613,6 +615,66 @@ small rectangle on a large background.
 
 ---
 
+## GradientLayer builder
+
+The `GradientLayerBuilder` provides a fluent API for creating linear and radial gradients. The old `GradientLayer::linear()` and `GradientLayer::radial()` constructors are deprecated since v2.0.0.
+
+### Quick start
+
+```rust
+use termcompositor::GradientLayerBuilder;
+
+// Linear gradient
+let grad = GradientLayerBuilder::new_linear()
+    .at(0, 0)
+    .size(20, 10)
+    .colors([255, 0, 0, 255], [0, 0, 255, 255])
+    .linear_points(0, 0, 20, 10)
+    .build();
+
+// Radial gradient
+let grad = GradientLayerBuilder::new_radial()
+    .at(0, 0)
+    .size(20, 20)
+    .colors([255, 255, 255, 255], [0, 0, 0, 255])
+    .radial_params(10, 10, 10)
+    .build();
+```
+
+### API reference
+
+| Method | Description |
+|---|---|
+| `GradientLayerBuilder::new_linear()` | Create a builder for a linear gradient. |
+| `GradientLayerBuilder::new_radial()` | Create a builder for a radial gradient. |
+| `.at(x, y)` | Set the layer position. |
+| `.size(w, h)` | Set the layer dimensions. |
+| `.colors(start, end)` | Set start and end RGBA colours. |
+| `.linear_points(sx, sy, ex, ey)` | Set start/end coordinates for linear gradient. |
+| `.radial_params(cx, cy, r)` | Set center coordinates and radius for radial gradient. |
+| `.with_z(z)` | Set the z-order. |
+| `.with_name(name)` | Set the debug label. |
+| `.build()` | Consume the builder and return a `GradientLayer`. |
+
+### Deprecation notice
+
+The old constructors are deprecated but still functional:
+
+```rust
+// Deprecated — will emit a warning
+let grad = GradientLayer::linear(0, 0, 20, 10, [255,0,0,255], [0,0,255,255], 0, 0, 20, 10);
+
+// Recommended
+let grad = GradientLayerBuilder::new_linear()
+    .at(0, 0)
+    .size(20, 10)
+    .colors([255, 0, 0, 255], [0, 0, 255, 255])
+    .linear_points(0, 0, 20, 10)
+    .build();
+```
+
+---
+
 ## Layer lookup by name
 
 `LayerStack` provides named lookup methods to find layers by their name
@@ -649,6 +711,48 @@ if let Some(entry) = stack.find_by_name_mut("bg") {
 - Returns `None` if no entry has the given name.
 - Lookup is O(n) linear scan — suitable for small stacks; use `LayerId`
   for O(1) access in performance-critical code.
+
+---
+
+## SceneNode parent-child traversal
+
+The `SceneGraph` supports parent-child relationships with full traversal capabilities. Each node can have one parent and multiple children.
+
+### Quick start
+
+```rust
+use termcompositor::SceneGraph;
+
+let mut sg = SceneGraph::new();
+let root = sg.add_group("root", (0, 0));
+let child1 = sg.add_child(root, "child1", (10, 10));
+let child2 = sg.add_child(root, "child2", (20, 20));
+let grandchild = sg.add_child(child1, "grandchild", (5, 5));
+
+// Traverse the tree
+assert_eq!(sg.parent(grandchild), Some(child1));
+assert_eq!(sg.children(root), &[child1, child2]);
+assert_eq!(sg.depth(grandchild), 2); // 2 levels from root
+```
+
+### Traversal methods
+
+| Method | Returns | Description |
+|---|---|---|
+| `parent(idx)` | `Option<usize>` | Parent node index (None for root) |
+| `children(idx)` | `&[usize]` | Child node indices |
+| `ancestors(idx)` | `Vec<usize>` | All ancestor indices up to root |
+| `depth(idx)` | `usize` | Depth from root (iterative, no allocation) |
+| `descendants(idx)` | `Vec<usize>` | All descendants in pre-order |
+
+### Moving nodes
+
+```rust
+// Move a node to a new parent (with cycle detection)
+sg.move_to(grandchild, child2)?; // Ok(()) if successful
+```
+
+The `move_to()` method includes cycle detection to prevent creating circular references. If the target parent is a descendant of the node being moved, the operation fails with an error.
 
 ---
 

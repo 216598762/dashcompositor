@@ -32,7 +32,7 @@ Each stage maps to a public module:
 
 | Stack layer | Module | Central types |
 |---|---|---|
-| Layer types | [`layer`] | `Layer` trait, `SolidColor`, `RectLayer`, `TextLayer`, `ImageLayer` |
+| Layer types | [`layer`] | `Layer` trait, `SolidColor`, `RectLayer`, `TextLayer`, `ImageLayer`, `GradientLayer`, `BorderLayer`, `CanvasLayer`, `DropShadow`, `SceneGraph` |
 | Layer storage | [`compositor`] | `LayerStack`, `LayerEntry`, `LayerId` |
 | Compositing | [`compositor`] | `Compositor` trait, `CpuCompositor` |
 | Pixel buffer | [`framebuffer`] | `FrameBuffer`, `blend_over` |
@@ -100,8 +100,14 @@ All built-in layers implement the [`Layer`] trait.
 | Type | Constructor | Notes |
 |---|---|---|
 | [`SolidColor`] | `SolidColor::new(r, g, b, a)` | Fills the entire framebuffer with a single RGBA colour. Has no position. |
-| [`RectLayer`] | `RectLayer::new(x, y, w, h, [r, g, b, a])` | Positioned rectangle with colour. Clipped to framebuffer bounds. |
-| [`TextLayer`] | `TextLayer::new(x, y, text, [r, g, b, a])` | UTF-8 text rendered with the bundled Fira Mono font (when `font-rasterizer` is enabled) or a solid-block placeholder (without). |
+| [`RectLayer`] | `RectLayer::new(x, y, w, h, [r, g, b, a])` | Positioned rectangle with colour. Clipped to framebuffer bounds. Supports `border_radius` for rounded corners. |
+| [`TextLayer`] | `TextLayer::new(x, y, text, [r, g, b, a])` | UTF-8 text rendered with the bundled Fira Mono font (when `font-rasterizer` is enabled) or a solid-block placeholder (without). Supports `TextAlignment` (Left/Center/Right). |
+| [`GradientLayer`] | `GradientLayerBuilder::new_linear()` / `new_radial()` | Linear or radial gradient with sRGB interpolation. Use the builder API for construction. |
+| [`BorderLayer`] | `BorderLayer::new(x, y, w, h, [r, g, b, a])` | Rectangular border (stroke only) with configurable `border_width`. |
+| [`CanvasLayer`] | `CanvasLayer::new(x, y, w, h)` | Freeform drawing canvas with `draw_pixel`, `draw_line`, `draw_circle`, `fill_rect`, `clear` methods. |
+| [`DropShadow`] | `DropShadow::new(inner)` | Wrapper layer that adds a blurred shadow behind any inner layer. Supports `spread` and `glow`. |
+| [`SceneGraph`] | `SceneGraph::new()` | Parent-child tree with grouped transforms, cascading visibility/opacity/offset, and traversal methods. |
+| [`ClipLayer`] | `ClipLayer::new(inner)` | Wrapper layer that clips inner layer rendering to a rectangular region. |
 | [`ImageLayer`] | `ImageLayer::from_path(path)` (requires `image-decoder` feature) | Decodes PNG and JPEG images. |
 
 Common builders (chainable):
@@ -113,6 +119,54 @@ Common builders (chainable):
 | `.with_opacity(opacity)` | All (via entry) | Per-layer opacity multiplier |
 | `.with_font(src, size)` | `TextLayer` | Custom font source and pixel size |
 | `.with_font_size(size)` | `TextLayer` | Change pixel size only |
+| `.with_alignment(alignment)` | `TextLayer` | Horizontal alignment (Left/Center/Right) |
+| `.with_border_radius(r)` | `RectLayer` | Rounded corners |
+| `.with_border_width(w)` | `BorderLayer` | Border stroke width |
+| `.with_offset(x, y)` | `DropShadow` | Shadow displacement |
+| `.with_blur(radius)` | `DropShadow` | Box blur radius |
+| `.with_spread(pixels)` | `DropShadow` | Dilate/erode shadow shape |
+| `.with_glow(color, blur)` | `DropShadow` | Centered glow effect |
+| `.with_transform(t)` | `LayerEntry` | Per-layer rotation/scaling |
+| `.with_accessibility(meta)` | `LayerEntry` | Alt-text and semantic role |
+
+### GradientLayer Builder
+
+The `GradientLayerBuilder` provides a fluent API for creating gradients:
+
+```rust
+use termcompositor::GradientLayerBuilder;
+
+// Linear gradient
+let grad = GradientLayerBuilder::new_linear()
+    .at(0, 0)
+    .size(20, 10)
+    .colors([255, 0, 0, 255], [0, 0, 255, 255])
+    .linear_points(0, 0, 20, 10)
+    .build();
+
+// Radial gradient
+let grad = GradientLayerBuilder::new_radial()
+    .at(0, 0)
+    .size(20, 20)
+    .colors([255, 255, 255, 255], [0, 0, 0, 255])
+    .radial_params(10, 10, 10)
+    .build();
+```
+
+**Note:** The old `GradientLayer::linear()` and `GradientLayer::radial()` constructors are deprecated since v2.0.0.
+
+### SceneGraph Traversal
+
+The `SceneGraph` supports parent-child traversal via these methods:
+
+| Method | Returns | Description |
+|---|---|---|
+| `parent(idx)` | `Option<usize>` | Parent node index (None for root) |
+| `children(idx)` | `&[usize]` | Child node indices |
+| `ancestors(idx)` | `Vec<usize>` | All ancestor indices up to root |
+| `depth(idx)` | `usize` | Depth from root (iterative, no allocation) |
+| `descendants(idx)` | `Vec<usize>` | All descendants in pre-order |
+| `move_to(idx, parent)` | `Result<(), usize>` | Reparent node with cycle detection |
 
 ### Framebuffer
 
