@@ -186,7 +186,7 @@ Requires the `image-decoder` feature:
 
 ```toml
 [dependencies]
-termcompositor = { version = "0.12", features = ["image-decoder"] }
+termcompositor = { version = "2.0", features = ["image-decoder"] }
 ```
 
 ```rust
@@ -972,7 +972,7 @@ Human-readable diagnostics are written to stderr:
 
 ```
 $ termcompositor
-termcompositor v0.12.0 -- multi-layer + auto-detect encoder: host terminal = 80 cols x 24 rows
+termcompositor v2.0.0 -- multi-layer + auto-detect encoder: host terminal = 80 cols x 24 rows
 background: SolidColor([0, 0, 64, 255])
 rect:      RectLayer at (20,6) 40x12 [0,200,0,200] z=10
 label:     TextLayer at (2,1) "termcompositor" z=20
@@ -1206,7 +1206,7 @@ enabling the corresponding Cargo feature in your `Cargo.toml`.
 
 ```toml
 [dependencies]
-termcompositor = { version = "0.12", features = ["kitty-encoder", "sixel-encoder"] }
+termcompositor = { version = "2.0", features = ["kitty-encoder", "sixel-encoder"] }
 ```
 
 Enable at least one encoder feature. If you want auto-detection to work for all
@@ -1283,7 +1283,7 @@ value) for layout verification.
 
 ```toml
 [dependencies]
-termcompositor = { version = "0.12", default-features = false, features = ["font-rasterizer"] }
+termcompositor = { version = "2.0", default-features = false, features = ["font-rasterizer"] }
 ```
 
 `font-rasterizer` is enabled by default, so plain `termcompositor = "0.12"`
@@ -1300,7 +1300,7 @@ manually.
 
 ```toml
 [dependencies]
-termcompositor = { version = "0.12", features = ["image-decoder"] }
+termcompositor = { version = "2.0", features = ["image-decoder"] }
 ```
 
 ### Auto-detection picks the wrong protocol
@@ -1374,7 +1374,7 @@ exits with code 0:
 
 ```
 $ ./target/release/termcompositor  # default build, no encoder features
-termcompositor v0.12.0 -- multi-layer + auto-detect encoder: host terminal = 80 cols x 24 rows
+termcompositor v2.0.0 -- multi-layer + auto-detect encoder: host terminal = 80 cols x 24 rows
 ...
 encoder error for protocol sixel: protocol sixel is not supported in this build (is the required Cargo feature enabled?)
 ```
