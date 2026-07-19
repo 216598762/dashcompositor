@@ -13,6 +13,9 @@ use termcompositor::{DirtyRect, DirtyRegion, FrameBuffer, LayerStack, RectLayer,
 #[cfg(all(feature = "font-rasterizer", feature = "kitty-encoder"))]
 use termcompositor::TextLayer;
 #[cfg(any(feature = "kitty-encoder", feature = "sixel-encoder"))]
+// Not every import is used by every encoder-specific test module:
+//   CanvasLayer, ClipLayer, ClipRegion, DropShadow, Rect, dispatch_to_writer → kitty only
+//   BorderLayer, GradientLayer, Protocol, ProtocolEncoder → kitty + sixel
 #[allow(unused_imports)]
 use termcompositor::{
     dispatch_to_writer, BorderLayer, CanvasLayer, ClipLayer, ClipRegion, DropShadow, GradientLayer,
