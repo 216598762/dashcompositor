@@ -8,8 +8,6 @@
 //! inside its main loop.
 
 use termcompositor::{DirtyRect, DirtyRegion, FrameBuffer, LayerStack, RectLayer, SolidColor};
-// Encoder-specific imports: some are only used with kitty, others with sixel.
-// Allow unused_imports so the file compiles cleanly with any feature combination.
 #[cfg(all(feature = "font-rasterizer", feature = "kitty-encoder"))]
 use termcompositor::TextLayer;
 #[cfg(any(feature = "kitty-encoder", feature = "sixel-encoder"))]
