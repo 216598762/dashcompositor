@@ -18,7 +18,7 @@ no shell input. You build a frame, `termcompositor` encodes it.
 
 ## What's new in v2.0.0
 
-- **GradientLayer Builder** — `GradientLayer::linear()` and `GradientLayer::radial()` replaced by a fluent `GradientLayerBuilder` API with `new_linear()`, `new_radial()`, `at()`, `size()`, `colors()`, etc.
+- **GradientLayer Builder** — `GradientLayer::linear()` and `GradientLayer::radial()` deprecated in favor of a fluent `GradientLayerBuilder` API with `new_linear()`, `new_radial()`, `at()`, `size()`, `colors()`, etc. The old constructors still work but emit a deprecation warning.
 - **FontSource memory leak fix** — `TextLayer::with_font(FontSource::Path)` no longer leaks memory.
 - **SceneNode parent-child traversal** — `SceneGraph` now supports `parent()`, `children()`, `ancestors()`, `depth()`, `descendants()`, and `move_to()` with cycle detection.
 

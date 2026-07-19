@@ -10,8 +10,8 @@ readme = "README.md"
 keywords = ["terminal", "compositor", "graphics", "kitty", "sixel"]
 categories = ["graphics", "rendering"]
 authors = ["216598762"]
-# v0.11.0: pre-1.0 infrastructure — MSRV policy, CONTRIBUTING.md,
-# benchmarks. Publishing is enabled.
+# v2.0.0: GradientLayer builder pattern, FontSource leak fix,
+# SceneNode parent-child traversal.
 publish = true
 
 [features]
