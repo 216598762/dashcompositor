@@ -7,12 +7,16 @@
 //! and valid protocol bytes, matching what `run_with_config` does
 //! inside its main loop.
 
-use termcompositor::{DropShadow,
-    BorderLayer, CanvasLayer, ClipLayer, ClipRegion, DirtyRect, DirtyRegion,
-    dispatch_to_writer, FrameBuffer, GradientLayer, LayerStack, Protocol,
-    ProtocolEncoder, Rect, RectLayer, SolidColor,
+use termcompositor::{DirtyRect, DirtyRegion, FrameBuffer, LayerStack, RectLayer, SolidColor};
+// Encoder-specific imports: some are only used with kitty, others with sixel.
+// Allow unused_imports so the file compiles cleanly with any feature combination.
+#[cfg(any(feature = "kitty-encoder", feature = "sixel-encoder"))]
+#[allow(unused_imports)]
+use termcompositor::{
+    dispatch_to_writer, BorderLayer, CanvasLayer, ClipLayer, ClipRegion, DropShadow,
+    GradientLayer, Protocol, ProtocolEncoder, Rect,
 };
-#[cfg(feature = "font-rasterizer")]
+#[cfg(all(feature = "font-rasterizer", feature = "kitty-encoder"))]
 use termcompositor::TextLayer;
 
 // ── render_diff with dirty regions ───────────────────────────
