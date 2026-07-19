@@ -8,9 +8,11 @@ original v1.0.0 roadmap (completed) and future v2.0.0 improvements.
 Refactoring and API improvements that require breaking changes.
 These are tracked via `TODO(v2.0)` comments in the codebase.
 
-### 1. GradientLayer Builder Pattern
+### 1. GradientLayer Builder Pattern ✅ Completed
 `GradientLayer::linear()` (10 args) and `GradientLayer::radial()` (9 args)
-have too many arguments. Refactor to a builder pattern with sensible defaults.
+have too many arguments. Refactored to `GradientLayerBuilder` with fluent API
+(new_linear, new_radial, at, size, colors, linear_points, radial_params, with_z,
+with_name, build). Deprecated the old constructors for backwards compatibility.
 
 **Current API:**
 ```rust
@@ -38,12 +40,10 @@ GradientLayer::radial()
 
 **Impact:** ~13 call sites to update (tests/animation.rs, tests/pipeline.rs, src/layer.rs)
 
-### 2. FontSource Memory Leak Fix
-`FontSource::Path` uses `Box::leak` to satisfy lifetime requirements when
-loading fonts from file paths. Store the font data in the struct instead.
-
-**Current approach:** ```Box::leak(data.into_boxed_slice())```
-**Proposed:** Store `Vec<u8>` in a `OnceLock<Vec<u8>>` field alongside `OnceLock<Font>`.
+### 2. FontSource Memory Leak Fix ✅ Completed
+`FontSource::Path` used `Box::leak` to satisfy lifetime requirements when
+loading fonts from file paths. Now stores font data in a `OnceLock<Vec<u8>>`
+field that is properly dropped when the `TextLayer` is dropped.
 
 ### 3. SceneNode Parent Field Activation ✅ Completed
 Implemented parent-child traversal with `parent()`, `children()`, `ancestors()`,
